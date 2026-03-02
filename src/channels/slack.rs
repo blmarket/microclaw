@@ -31,7 +31,7 @@ pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
     fields: &[
         ChannelFieldDef {
             yaml_key: "bot_token",
-            label: "Slack bot token (xoxb-...)",
+            label: "Slack bot token (OAuth, xoxb-...)",
             default: "",
             secret: true,
             required: true,
@@ -215,6 +215,32 @@ fn slack_chat_lock(channel_name: &str, external_chat_id: &str) -> Arc<tokio::syn
         .clone()
 }
 
+fn normalize_slack_thread_ts(thread_ts: Option<&str>) -> Option<&str> {
+    thread_ts.map(str::trim).filter(|v| !v.is_empty())
+}
+
+fn slack_external_chat_id(channel: &str, thread_ts: Option<&str>) -> String {
+    match normalize_slack_thread_ts(thread_ts) {
+        Some(thread_ts) => format!("{channel}:{thread_ts}"),
+        None => channel.to_string(),
+    }
+}
+
+fn slack_chat_title(channel: &str, thread_ts: Option<&str>) -> String {
+    match normalize_slack_thread_ts(thread_ts) {
+        Some(thread_ts) => format!("slack-{channel}-thread-{thread_ts}"),
+        None => format!("slack-{channel}"),
+    }
+}
+
+fn should_skip_slack_message_subtype(subtype: Option<&str>) -> bool {
+    match subtype {
+        None => false,
+        Some("thread_broadcast") | Some("reply_broadcast") => false,
+        Some(_) => true,
+    }
+}
+
 impl SlackAdapter {
     pub fn new(name: String, bot_token: String) -> Self {
         SlackAdapter {
@@ -393,6 +419,7 @@ async fn resolve_bot_user_id(bot_token: &str) -> Result<String, String> {
         .json()
         .await
         .map_err(|e| format!("Failed to parse auth.test response: {e}"))?;
+    info!("Slack auth.test response: {}", body);
 
     if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         let err = body
@@ -409,16 +436,26 @@ async fn resolve_bot_user_id(bot_token: &str) -> Result<String, String> {
 }
 
 /// Send a text response to a Slack channel, splitting at 4000 chars.
-async fn send_slack_response(bot_token: &str, channel: &str, text: &str) -> Result<(), String> {
+async fn send_slack_response(
+    bot_token: &str,
+    channel: &str,
+    thread_ts: Option<&str>,
+    text: &str,
+) -> Result<(), String> {
     let client = reqwest::Client::new();
     const MAX_LEN: usize = 4000;
 
     let chunks = split_text(text, MAX_LEN);
     for chunk in chunks {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "channel": channel,
             "text": chunk,
         });
+        if let Some(thread_ts) = thread_ts {
+            if !thread_ts.trim().is_empty() {
+                body["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
+            }
+        }
         let resp = client
             .post("https://slack.com/api/chat.postMessage")
             .header(
@@ -547,8 +584,9 @@ async fn run_socket_mode(
                     if event_type == "message" || event_type == "app_mention" {
                         let event = &envelope["payload"]["event"];
 
-                        // Skip bot messages, message_changed, etc.
-                        if event.get("subtype").is_some() {
+                        // Skip system/edit variants, but keep user-visible thread broadcasts.
+                        let subtype = event.get("subtype").and_then(|v| v.as_str());
+                        if should_skip_slack_message_subtype(subtype) {
                             continue;
                         }
                         // Skip messages from ourselves
@@ -578,6 +616,10 @@ async fn run_socket_mode(
                             .to_string();
                         let is_dm = channel_type == "im";
                         let is_app_mention = event_type == "app_mention";
+                        let thread_ts = event
+                            .get("thread_ts")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
                         let ts = event
                             .get("ts")
                             .and_then(|v| v.as_str())
@@ -603,6 +645,7 @@ async fn run_socket_mode(
                                 &text_content,
                                 is_dm,
                                 is_app_mention,
+                                thread_ts.as_deref(),
                                 &ts,
                             )
                             .await;
@@ -636,17 +679,22 @@ async fn handle_slack_message(
     text: &str,
     is_dm: bool,
     is_app_mention: bool,
+    thread_ts: Option<&str>,
     ts: &str,
 ) {
+    let normalized_thread_ts = normalize_slack_thread_ts(thread_ts);
+    let external_chat_id = slack_external_chat_id(channel, normalized_thread_ts);
     let chat_type = if is_dm { "slack_dm" } else { "slack" };
-    let title = format!("slack-{channel}");
+    let title = slack_chat_title(channel, normalized_thread_ts);
 
     let chat_id = call_blocking(app_state.db.clone(), {
-        let channel = channel.to_string();
+        let external_chat_id = external_chat_id.clone();
         let title = title.clone();
         let chat_type = chat_type.to_string();
         let channel_name = runtime.channel_name.clone();
-        move |db| db.resolve_or_create_chat_id(&channel_name, &channel, Some(&title), &chat_type)
+        move |db| {
+            db.resolve_or_create_chat_id(&channel_name, &external_chat_id, Some(&title), &chat_type)
+        }
     })
     .await
     .unwrap_or(0);
@@ -682,7 +730,16 @@ async fn handle_slack_message(
     let trimmed = text.trim();
     let mention_tag = format!("<@{bot_user_id}>");
     let should_respond = is_dm || is_app_mention || text.contains(&mention_tag);
-    if is_slash_command(trimmed) {
+
+    let is_slash = is_slash_command(trimmed);
+
+    // In group chats, only addressed messages should enter session history.
+    // Otherwise old non-mention chatter leaks into context once a later mention arrives.
+    if !should_respond && !is_slash {
+        return;
+    }
+
+    if is_slash {
         if !should_respond && !app_state.config.allow_group_slash_without_mention {
             return;
         }
@@ -695,21 +752,28 @@ async fn handle_slack_message(
         )
         .await
         {
-            let _ = send_slack_response(bot_token, channel, &reply).await;
+            let _ = send_slack_response(bot_token, channel, normalized_thread_ts, &reply).await;
             return;
         }
         if let Some(plugin_response) =
             maybe_plugin_slash_response(&app_state.config, trimmed, chat_id, &runtime.channel_name)
                 .await
         {
-            let _ = send_slack_response(bot_token, channel, &plugin_response).await;
+            let _ = send_slack_response(bot_token, channel, normalized_thread_ts, &plugin_response)
+                .await;
             return;
         }
-        let _ = send_slack_response(bot_token, channel, &unknown_command_response()).await;
+        let _ = send_slack_response(
+            bot_token,
+            channel,
+            normalized_thread_ts,
+            &unknown_command_response(),
+        )
+        .await;
         return;
     }
 
-    let chat_lock = slack_chat_lock(&runtime.channel_name, channel);
+    let chat_lock = slack_chat_lock(&runtime.channel_name, &external_chat_id);
     let _guard = chat_lock.lock().await;
 
     // Store incoming message
@@ -731,11 +795,6 @@ async fn handle_slack_message(
             "Slack: skipping duplicate message chat_id={} message_id={}",
             chat_id, inbound_message_id
         );
-        return;
-    }
-
-    // Determine if we should respond
-    if !should_respond {
         return;
     }
 
@@ -780,7 +839,9 @@ async fn handle_slack_message(
                     );
                 }
             } else if !response.is_empty() {
-                if let Err(e) = send_slack_response(bot_token, channel, &response).await {
+                if let Err(e) =
+                    send_slack_response(bot_token, channel, normalized_thread_ts, &response).await
+                {
                     error!("Slack: failed to send response: {e}");
                 }
 
@@ -796,7 +857,8 @@ async fn handle_slack_message(
                     call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg)).await;
             } else {
                 let fallback = "I couldn't produce a visible reply after an automatic retry. Please try again.";
-                let _ = send_slack_response(bot_token, channel, fallback).await;
+                let _ =
+                    send_slack_response(bot_token, channel, normalized_thread_ts, fallback).await;
 
                 let bot_msg = StoredMessage {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -813,7 +875,13 @@ async fn handle_slack_message(
         Err(e) => {
             error!("Error processing Slack message: {e}");
             if !should_suppress_user_error(&e) {
-                let _ = send_slack_response(bot_token, channel, &format!("Error: {e}")).await;
+                let _ = send_slack_response(
+                    bot_token,
+                    channel,
+                    normalized_thread_ts,
+                    &format!("Error: {e}"),
+                )
+                .await;
             }
         }
     }
@@ -846,5 +914,36 @@ commands:
         let out = maybe_plugin_slash_response(&cfg, "/slackplug", 1, "slack").await;
         assert_eq!(out.as_deref(), Some("slack-ok"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_slack_chat_id_and_title_use_thread_ts() {
+        assert_eq!(
+            slack_external_chat_id("D123", Some("1740659112.001200")),
+            "D123:1740659112.001200"
+        );
+        assert_eq!(
+            slack_chat_title("D123", Some("1740659112.001200")),
+            "slack-D123-thread-1740659112.001200"
+        );
+    }
+
+    #[test]
+    fn test_slack_chat_id_and_title_ignore_blank_thread_ts() {
+        assert_eq!(slack_external_chat_id("D123", Some("   ")), "D123");
+        assert_eq!(slack_chat_title("D123", Some("   ")), "slack-D123");
+    }
+
+    #[test]
+    fn test_should_skip_slack_message_subtype_allows_thread_broadcast_variants() {
+        assert!(!should_skip_slack_message_subtype(None));
+        assert!(!should_skip_slack_message_subtype(Some("thread_broadcast")));
+        assert!(!should_skip_slack_message_subtype(Some("reply_broadcast")));
+    }
+
+    #[test]
+    fn test_should_skip_slack_message_subtype_skips_other_variants() {
+        assert!(should_skip_slack_message_subtype(Some("message_changed")));
+        assert!(should_skip_slack_message_subtype(Some("bot_message")));
     }
 }

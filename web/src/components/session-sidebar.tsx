@@ -5,6 +5,7 @@ import type { SessionItem } from '../types'
 type SessionSidebarProps = {
   appearance: 'dark' | 'light'
   onToggleAppearance: () => void
+  onToggleDesktopSidebar?: () => void
   uiTheme: string
   onUiThemeChange: (theme: string) => void
   uiThemeOptions: Array<{ key: string; label: string; color: string }>
@@ -51,6 +52,7 @@ function formatCreatedLabel(item: SessionItem): string {
 export function SessionSidebar({
   appearance,
   onToggleAppearance,
+  onToggleDesktopSidebar,
   uiTheme,
   onUiThemeChange,
   uiThemeOptions,
@@ -148,6 +150,23 @@ export function SessionSidebar({
           >
             <span className="text-sm">{isDark ? '☀' : '☾'}</span>
           </button>
+          {onToggleDesktopSidebar ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onToggleDesktopSidebar()
+              }}
+              aria-label="Collapse sessions sidebar"
+              className={
+                isDark
+                  ? 'hidden md:inline-flex h-8 w-8 items-center justify-center rounded-md border border-[color:var(--mc-border-soft)] bg-[color:var(--mc-bg-panel)] text-slate-200 hover:brightness-110'
+                  : 'hidden md:inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
+              }
+            >
+              <span className="text-sm">⟨</span>
+            </button>
+          ) : null}
           {themeMenuOpen ? (
             <div
               ref={themeMenuRef}
@@ -216,11 +235,11 @@ export function SessionSidebar({
       <div
         className={
           isDark
-            ? 'min-h-0 flex-1 rounded-xl border border-[color:var(--mc-border-soft)] bg-[color:var(--mc-bg-panel)] p-2'
-            : 'min-h-0 flex-1 rounded-xl border border-slate-200 bg-slate-50/70 p-2'
+            ? 'flex min-h-0 flex-1 flex-col rounded-xl border border-[color:var(--mc-border-soft)] bg-[color:var(--mc-bg-panel)] p-2'
+            : 'flex min-h-0 flex-1 flex-col rounded-xl border border-slate-200 bg-slate-50/70 p-2'
         }
       >
-        <ScrollArea type="auto" style={{ height: '100%' }}>
+        <ScrollArea type="auto" className="min-h-0 flex-1">
           <div className="mb-2">
             <Text size="1" color="gray">
               Chats

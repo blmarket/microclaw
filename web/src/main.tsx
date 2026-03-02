@@ -39,6 +39,8 @@ import {
 } from '@radix-ui/themes'
 import '@radix-ui/themes/styles.css'
 import '@assistant-ui/react-ui/styles/index.css'
+import remarkBreaks from 'remark-breaks'
+import remarkGfm from 'remark-gfm'
 import './styles.css'
 import { SessionSidebar } from './components/session-sidebar'
 import { UsagePanel, type InjectionLogPoint, type MemoryObservability, type ReflectorRunPoint } from './components/usage-panel'
@@ -999,6 +1001,7 @@ type ThreadPaneProps = {
 function ThreadPane({ adapter, initialMessages, runtimeKey }: ThreadPaneProps) {
   const MarkdownText = makeMarkdownText({
     preprocess: (text) => extractThinkSegments(text).visibleText,
+    remarkPlugins: [remarkGfm, remarkBreaks],
   })
   const runtime = useLocalRuntime(adapter, {
     initialMessages,
@@ -1233,6 +1236,7 @@ function App() {
   const [appearance, setAppearance] = useState<Appearance>(readAppearance())
   const [uiTheme, setUiTheme] = useState<UiTheme>(readUiTheme())
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false)
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState<boolean>(true)
   const [sessions, setSessions] = useState<SessionItem[]>([])
   const [extraSessions, setExtraSessions] = useState<SessionItem[]>([])
   const [sessionKey, setSessionKey] = useState<string>(() => makeSessionKey())
@@ -2555,9 +2559,17 @@ function App() {
 
   useEffect(() => {
     if (!authAuthenticated) return
+    const existsOnServer = sessions.some((item) => item.session_key === sessionKey)
+    if (!existsOnServer) {
+      setHistorySeed([])
+      setHistoryCountBySession((prev) => ({ ...prev, [sessionKey]: 0 }))
+      setRuntimeNonce((x) => x + 1)
+      setError('')
+      return
+    }
     loadHistory(sessionKey).catch((e) => setError(e instanceof Error ? e.message : String(e)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey, authAuthenticated])
+  }, [sessionKey, authAuthenticated, sessions])
 
   useEffect(() => {
     if (!authAuthenticated) return
@@ -2598,26 +2610,35 @@ function App() {
             : 'h-screen w-screen bg-[radial-gradient(1200px_560px_at_-8%_-10%,#d1fae5_0%,transparent_58%),radial-gradient(1200px_560px_at_108%_-12%,#e0f2fe_0%,transparent_58%),#f8fafc]'
         }
       >
-        <div className="grid h-full min-h-0 grid-cols-1 md:grid-cols-[320px_minmax(0,1fr)]">
-          <div className="hidden md:block md:h-full">
-            <SessionSidebar
-              appearance={appearance}
-              onToggleAppearance={toggleAppearance}
-              uiTheme={uiTheme}
-              onUiThemeChange={(theme) => setUiTheme(theme as UiTheme)}
-              uiThemeOptions={UI_THEME_OPTIONS}
-              sessionItems={sessionItems}
-              selectedSessionKey={sessionKey}
-              onSessionSelect={(key) => setSessionKey(key)}
-              onRefreshSession={(key) => void onRefreshSessionByKey(key)}
-              onResetSession={(key) => void onResetSessionByKey(key)}
-              onDeleteSession={(key) => void onDeleteSessionByKey(key)}
-              onOpenConfig={openConfig}
-              onOpenUsage={() => openUsage(sessionKey)}
-              onNewSession={createSession}
-              appVersion={appVersion}
-            />
-          </div>
+        <div
+          className={
+            desktopSidebarOpen
+              ? 'grid h-full min-h-0 grid-cols-1 md:grid-cols-[320px_minmax(0,1fr)]'
+              : 'grid h-full min-h-0 grid-cols-1'
+          }
+        >
+          {desktopSidebarOpen ? (
+            <div className="hidden md:block md:h-full md:min-h-0 md:overflow-hidden">
+              <SessionSidebar
+                appearance={appearance}
+                onToggleAppearance={toggleAppearance}
+                onToggleDesktopSidebar={() => setDesktopSidebarOpen(false)}
+                uiTheme={uiTheme}
+                onUiThemeChange={(theme) => setUiTheme(theme as UiTheme)}
+                uiThemeOptions={UI_THEME_OPTIONS}
+                sessionItems={sessionItems}
+                selectedSessionKey={sessionKey}
+                onSessionSelect={(key) => setSessionKey(key)}
+                onRefreshSession={(key) => void onRefreshSessionByKey(key)}
+                onResetSession={(key) => void onResetSessionByKey(key)}
+                onDeleteSession={(key) => void onDeleteSessionByKey(key)}
+                onOpenConfig={openConfig}
+                onOpenUsage={() => openUsage(sessionKey)}
+                onNewSession={createSession}
+                appVersion={appVersion}
+              />
+            </div>
+          ) : null}
 
           {mobileSidebarOpen ? (
             <div className="fixed inset-0 z-40 md:hidden">
@@ -2703,6 +2724,20 @@ function App() {
                 >
                   ☰
                 </button>
+                {!desktopSidebarOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setDesktopSidebarOpen(true)}
+                    aria-label="Expand sessions sidebar"
+                    className={
+                      appearance === 'dark'
+                        ? 'hidden md:inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[color:var(--mc-border-soft)] text-slate-200'
+                        : 'hidden md:inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-300 text-slate-700'
+                    }
+                  >
+                    ⟩
+                  </button>
+                ) : null}
                 <Heading size="6" className="min-w-0 truncate">
                   {selectedSessionLabel}
                 </Heading>
