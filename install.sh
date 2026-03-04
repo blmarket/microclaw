@@ -4,6 +4,7 @@ set -euo pipefail
 REPO="${MICROCLAW_REPO:-microclaw/microclaw}"
 BIN_NAME="microclaw"
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+SKIP_RUN="${MICROCLAW_INSTALL_SKIP_RUN:-0}"
 
 log() {
   printf '%s\n' "$*"
@@ -15,6 +16,46 @@ err() {
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+print_help() {
+  cat <<'EOF'
+Usage: install.sh [--skip-run]
+
+Options:
+  --skip-run   Do not auto-run microclaw after install.
+EOF
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --skip-run)
+        SKIP_RUN=1
+        ;;
+      -h|--help)
+        print_help
+        exit 0
+        ;;
+      *)
+        err "Unknown argument: $1"
+        print_help >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
+
+should_skip_run() {
+  case "${SKIP_RUN,,}" in
+    1|true|yes)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 detect_os() {
@@ -169,11 +210,17 @@ install_from_archive() {
 }
 
 main() {
-  local os arch install_dir release_json asset_url tmpdir archive asset_filename
+  local os arch install_dir release_json asset_url tmpdir archive asset_filename had_existing_bin
+
+  parse_args "$@"
 
   os="$(detect_os)"
   arch="$(detect_arch)"
   install_dir="$(detect_install_dir)"
+  had_existing_bin=0
+  if need_cmd "${BIN_NAME}"; then
+    had_existing_bin=1
+  fi
 
   log "Installing ${BIN_NAME} for ${os}/${arch}..."
   release_json="$(download_release_json)"
@@ -205,7 +252,11 @@ main() {
     log "Example: export PATH=\"\$HOME/.local/bin:\$PATH\""
   fi
   log "${BIN_NAME}"
-  if need_cmd "${BIN_NAME}"; then
+  if should_skip_run; then
+    log "Skipping auto-run (--skip-run)."
+  elif [ "$had_existing_bin" -eq 1 ]; then
+    log "Skipping auto-run (upgrade detected)."
+  elif need_cmd "${BIN_NAME}"; then
     log "Running: ${BIN_NAME}"
     if ! "${BIN_NAME}"; then
       err "Auto-run failed. Try running: ${BIN_NAME}"

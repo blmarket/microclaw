@@ -1,11 +1,18 @@
 param(
   [string]$Repo = $(if ($env:MICROCLAW_REPO) { $env:MICROCLAW_REPO } else { 'microclaw/microclaw' }),
-  [string]$InstallDir = $(if ($env:MICROCLAW_INSTALL_DIR) { $env:MICROCLAW_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.local\bin' })
+  [string]$InstallDir = $(if ($env:MICROCLAW_INSTALL_DIR) { $env:MICROCLAW_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }),
+  [switch]$SkipRun
 )
 
 $ErrorActionPreference = 'Stop'
 $BinName = 'microclaw.exe'
 $ApiUrl = "https://api.github.com/repos/$Repo/releases/latest"
+$skipRunFromEnv = $false
+if ($env:MICROCLAW_INSTALL_SKIP_RUN) {
+  $skipRunFromEnv = @('1', 'true', 'yes') -contains $env:MICROCLAW_INSTALL_SKIP_RUN.Trim().ToLowerInvariant()
+}
+$skipRunEffective = $SkipRun.IsPresent -or $skipRunFromEnv
+$hadExistingCommand = $null -ne (Get-Command microclaw -ErrorAction SilentlyContinue)
 
 function Write-Info([string]$msg) {
   Write-Host $msg
@@ -105,7 +112,11 @@ try {
   }
 
   Write-Info "microclaw"
-  if (Get-Command microclaw -ErrorAction SilentlyContinue) {
+  if ($skipRunEffective) {
+    Write-Info "Skipping auto-run (-SkipRun)."
+  } elseif ($hadExistingCommand) {
+    Write-Info "Skipping auto-run (upgrade detected)."
+  } elseif (Get-Command microclaw -ErrorAction SilentlyContinue) {
     Write-Info "Running: microclaw"
     try {
       & microclaw

@@ -119,7 +119,10 @@ fn handle_upgrade_cli() -> anyhow::Result<()> {
                     "-ExecutionPolicy",
                     "Bypass",
                     "-Command",
-                    &format!("iwr '{}' -UseBasicParsing | iex", script_url),
+                    &format!(
+                        "& ([ScriptBlock]::Create((iwr '{}' -UseBasicParsing).Content)) -SkipRun",
+                        script_url
+                    ),
                 ])
                 .status()
                 .map_err(|e| anyhow::anyhow!("failed to run powershell installer: {e}"))?
@@ -127,7 +130,7 @@ fn handle_upgrade_cli() -> anyhow::Result<()> {
         _ => {
             let script_url = format!("https://raw.githubusercontent.com/{repo}/main/install.sh");
             let cmd = format!(
-                "(curl -fsSL '{url}' || wget -qO- '{url}') | bash",
+                "(curl -fsSL '{url}' || wget -qO- '{url}') | bash -s -- --skip-run",
                 url = script_url
             );
             ProcessCommand::new("sh")
