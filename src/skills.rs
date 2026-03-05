@@ -1,5 +1,6 @@
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct SkillMetadata {
@@ -84,23 +85,36 @@ struct SkillCompatibility {
 
 pub struct SkillManager {
     skills_dir: PathBuf,
+    state_file: Option<PathBuf>,
 }
 
 const MAX_SKILLS_CATALOG_ITEMS: usize = 40;
 const MAX_SKILL_DESCRIPTION_CHARS: usize = 120;
 const COMPACT_SKILLS_MODE_THRESHOLD: usize = 20;
+const SKILLS_STATE_FILENAME: &str = "skills_state.json";
 
 impl SkillManager {
     pub fn from_skills_dir(skills_dir: &str) -> Self {
         SkillManager {
             skills_dir: PathBuf::from(skills_dir),
+            state_file: None,
+        }
+    }
+
+    pub fn from_skills_and_runtime(skills_dir: &str, runtime_dir: &str) -> Self {
+        SkillManager {
+            skills_dir: PathBuf::from(skills_dir),
+            state_file: Some(PathBuf::from(runtime_dir).join(SKILLS_STATE_FILENAME)),
         }
     }
 
     #[allow(dead_code)]
     pub fn new(data_dir: &str) -> Self {
         let skills_dir = PathBuf::from(data_dir).join("skills");
-        SkillManager { skills_dir }
+        SkillManager {
+            skills_dir,
+            state_file: None,
+        }
     }
 
     /// Discover all skills that are available on the current platform and satisfy dependency checks.
@@ -131,6 +145,7 @@ impl SkillManager {
 
     fn discover_skill_statuses(&self) -> Vec<SkillAvailability> {
         let mut statuses = Vec::new();
+        let state = self.read_state_file();
         let entries = match std::fs::read_dir(&self.skills_dir) {
             Ok(e) => e,
             Err(_) => return statuses,
@@ -147,6 +162,14 @@ impl SkillManager {
             }
             if let Ok(content) = std::fs::read_to_string(&skill_md) {
                 if let Some((meta, _body)) = parse_skill_md(&content, &path) {
+                    if matches!(state.get(&meta.name), Some(false)) {
+                        statuses.push(SkillAvailability {
+                            meta,
+                            available: false,
+                            reason: Some("Skill is disabled for this runtime.".to_string()),
+                        });
+                        continue;
+                    }
                     match self.skill_is_available(&meta) {
                         Ok(()) => statuses.push(SkillAvailability {
                             meta,
@@ -165,6 +188,25 @@ impl SkillManager {
 
         statuses.sort_by(|a, b| a.meta.name.cmp(&b.meta.name));
         statuses
+    }
+
+    pub fn has_skill(&self, name: &str) -> bool {
+        self.discover_skill_statuses()
+            .iter()
+            .any(|skill| skill.meta.name == name)
+    }
+
+    pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<(), String> {
+        if !self.has_skill(name) {
+            return Err(format!("Skill not found: {name}"));
+        }
+        let mut state = self.read_state_file();
+        if enabled {
+            state.remove(name);
+        } else {
+            state.insert(name.to_string(), false);
+        }
+        self.write_state_file(&state)
     }
 
     /// Load a skill by name if it is available on the current platform.
@@ -325,6 +367,34 @@ impl SkillManager {
     #[allow(dead_code)]
     pub fn skills_dir(&self) -> &PathBuf {
         &self.skills_dir
+    }
+
+    pub fn state_file_path(&self) -> Option<&Path> {
+        self.state_file.as_deref()
+    }
+
+    fn read_state_file(&self) -> HashMap<String, bool> {
+        let Some(path) = self.state_file.as_ref() else {
+            return HashMap::new();
+        };
+        if !path.exists() {
+            return HashMap::new();
+        }
+        match std::fs::read_to_string(path) {
+            Ok(raw) => serde_json::from_str::<HashMap<String, bool>>(&raw).unwrap_or_default(),
+            Err(_) => HashMap::new(),
+        }
+    }
+
+    fn write_state_file(&self, state: &HashMap<String, bool>) -> Result<(), String> {
+        let Some(path) = self.state_file.as_ref() else {
+            return Err("Skill state is not configured for this runtime.".to_string());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let body = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
+        std::fs::write(path, body).map_err(|e| e.to_string())
     }
 }
 
@@ -818,5 +888,70 @@ Use this skill to interact with Outline.
         assert!(result.is_some());
         let (meta, _body) = result.unwrap();
         assert_eq!(meta.env_file.as_deref(), Some(".env"));
+    }
+
+    #[test]
+    fn test_disable_skill_is_runtime_scoped() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "microclaw_skills_runtime_scoped_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let runtime_a = base_dir.join("runtime-a");
+        let runtime_b = base_dir.join("runtime-b");
+        let skills_dir = base_dir.join("skills");
+        let skill_dir = skills_dir.join("pdf");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: pdf
+description: Convert to PDF
+---
+Use this skill.
+"#,
+        )
+        .unwrap();
+
+        let manager_a = SkillManager::from_skills_and_runtime(
+            skills_dir.to_str().unwrap(),
+            runtime_a.to_str().unwrap(),
+        );
+        let manager_b = SkillManager::from_skills_and_runtime(
+            skills_dir.to_str().unwrap(),
+            runtime_b.to_str().unwrap(),
+        );
+
+        manager_a.set_enabled("pdf", false).unwrap();
+
+        let status_a = manager_a.discover_skills_with_status(true);
+        let status_b = manager_b.discover_skills_with_status(true);
+
+        assert!(!status_a[0].available);
+        assert!(status_a[0]
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("disabled"));
+        assert!(status_b[0].available);
+        assert!(skill_dir.join("SKILL.md").exists());
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_set_enabled_missing_skill_returns_error() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "microclaw_skills_enable_missing_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let runtime = base_dir.join("runtime");
+        let skills_dir = base_dir.join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let manager = SkillManager::from_skills_and_runtime(
+            skills_dir.to_str().unwrap(),
+            runtime.to_str().unwrap(),
+        );
+        let err = manager.set_enabled("missing", false).unwrap_err();
+        assert!(err.contains("Skill not found"));
+        let _ = std::fs::remove_dir_all(&base_dir);
     }
 }

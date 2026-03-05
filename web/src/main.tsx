@@ -44,6 +44,9 @@ import remarkGfm from 'remark-gfm'
 import './styles.css'
 import { SessionSidebar } from './components/session-sidebar'
 import { UsagePanel, type InjectionLogPoint, type MemoryObservability, type ReflectorRunPoint } from './components/usage-panel'
+import { SkillsSettings } from './components/skills-settings'
+import { ConfigFieldCard, type ConfigFieldCardProps } from './components/config-field-card'
+import { api, makeHeaders, ApiError } from './lib/api'
 import type { SessionItem } from './types'
 
 type ThinkExtraction = {
@@ -284,7 +287,7 @@ interface DynChannelField {
   /** If true, field value is a secret (not pre-filled from server config) */
   secret: boolean
   /** Value type for payload encoding */
-  valueType?: 'string' | 'bool'
+  valueType?: 'string' | 'bool' | 'number'
 }
 interface DynChannelDef {
   /** Channel name, e.g. "slack" */
@@ -319,6 +322,8 @@ const DYNAMIC_CHANNELS: DynChannelDef[] = [
       { yamlKey: 'app_token', label: 'slack_app_token', placeholder: 'xapp-...', description: 'App-level token (xapp-) for Socket Mode connection. Leave blank to keep current secret unchanged.', secret: true },
       { yamlKey: 'bot_username', label: 'slack_bot_username', placeholder: 'slack_bot_name', description: 'Optional Slack-specific bot username override.', secret: false },
       { yamlKey: 'model', label: 'slack_model', placeholder: 'claude-sonnet-4-5-20250929', description: 'Optional Slack bot model override for this account.', secret: false },
+      { yamlKey: 'capture_unmentioned_images', label: 'slack_capture_unmentioned_images', placeholder: 'false', description: 'Capture inbound images without @mention in group channels (true/false). Default: false.', secret: false, valueType: 'bool' },
+      { yamlKey: 'inbound_image_max_mb', label: 'slack_inbound_image_max_mb', placeholder: '20', description: 'Max inbound Slack image size in MB. Default: 20.', secret: false, valueType: 'number' },
     ],
   },
   {
@@ -668,48 +673,6 @@ if (typeof document !== 'undefined') {
   document.documentElement.setAttribute('data-ui-theme', readUiTheme())
 }
 
-function makeHeaders(options: RequestInit = {}): HeadersInit {
-  const headers: Record<string, string> = {
-    ...(options.headers as Record<string, string> | undefined),
-  }
-  if (options.body && !headers['Content-Type']) {
-    headers['Content-Type'] = 'application/json'
-  }
-  // Backend currently validates CSRF by scope (including some GET admin endpoints),
-  // so attach token whenever present to avoid false 403 for authenticated browser sessions.
-  const csrf = readCookie('mc_csrf')
-  if (csrf && !hasHeader(headers, 'x-csrf-token')) {
-    headers['x-csrf-token'] = csrf
-  }
-  return headers
-}
-
-class ApiError extends Error {
-  status: number
-
-  constructor(message: string, status: number) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-  }
-}
-
-function hasHeader(headers: Record<string, string>, key: string): boolean {
-  const needle = key.toLowerCase()
-  return Object.keys(headers).some((k) => k.toLowerCase() === needle)
-}
-
-function readCookie(name: string): string {
-  if (typeof document === 'undefined') return ''
-  const encodedName = `${encodeURIComponent(name)}=`
-  const items = document.cookie ? document.cookie.split('; ') : []
-  for (const item of items) {
-    if (!item.startsWith(encodedName)) continue
-    return decodeURIComponent(item.slice(encodedName.length))
-  }
-  return ''
-}
-
 function readBootstrapTokenFromHash(): string {
   if (typeof window === 'undefined') return ''
   const raw = window.location.hash.startsWith('#')
@@ -738,18 +701,6 @@ function generatePassword(): string {
   }
   const fallback = Math.random().toString(36).slice(2, 14)
   return `mc-${fallback.slice(0, 6)}-${fallback.slice(6, 12)}!`
-}
-
-async function api<T>(
-  path: string,
-  options: RequestInit = {},
-): Promise<T> {
-  const res = await fetch(path, { ...options, headers: makeHeaders(options), credentials: 'same-origin' })
-  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
-  if (!res.ok) {
-    throw new ApiError(String(data.error || data.message || `HTTP ${res.status}`), res.status)
-  }
-  return data as T
 }
 
 async function* parseSseFrames(
@@ -1105,7 +1056,20 @@ function parseOptionalBoolString(input: string, fieldName: string): boolean | nu
   throw new Error(`${fieldName} must be true/false (or 1/0)`)
 }
 
-function dynamicFieldDraftValue(raw: unknown, valueType: 'string' | 'bool' = 'string'): string {
+function parseOptionalU64String(input: string, fieldName: string): number | null {
+  const trimmed = input.trim()
+  if (!trimmed) return null
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`${fieldName} must be a non-negative integer`)
+  }
+  const parsed = Number(trimmed)
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${fieldName} must be a safe integer`)
+  }
+  return parsed
+}
+
+function dynamicFieldDraftValue(raw: unknown, valueType: 'string' | 'bool' | 'number' = 'string'): string {
   if (valueType === 'bool') {
     if (typeof raw === 'boolean') return raw ? 'true' : 'false'
     const text = String(raw || '').trim().toLowerCase()
@@ -1114,28 +1078,18 @@ function dynamicFieldDraftValue(raw: unknown, valueType: 'string' | 'bool' = 'st
     if (text === 'false' || text === '0' || text === 'no') return 'false'
     return String(raw || '')
   }
+  if (valueType === 'number') {
+    if (typeof raw === 'number' && Number.isFinite(raw)) return String(Math.trunc(raw))
+    const text = String(raw || '').trim()
+    if (!text) return ''
+    return text
+  }
   return String(raw || '')
 }
 
 function normalizeWorkingDirIsolation(value: unknown): 'chat' | 'shared' {
   const normalized = String(value || '').trim().toLowerCase()
   return normalized === 'shared' ? 'shared' : 'chat'
-}
-
-type ConfigFieldCardProps = {
-  label: string
-  description: React.ReactNode
-  children: React.ReactNode
-}
-
-function ConfigFieldCard({ label, description, children }: ConfigFieldCardProps) {
-  return (
-    <Card className="p-3">
-      <Text size="2" weight="medium">{label}</Text>
-      <Text size="1" color="gray" className="mt-1 block">{description}</Text>
-      <div className="mt-2">{children}</div>
-    </Card>
-  )
 }
 
 type SoulPathPickerFieldProps = {
@@ -2482,6 +2436,14 @@ function App() {
                 if (parsed !== null) {
                   fields[f.yamlKey] = parsed
                 }
+              } else if ((f.valueType || 'string') === 'number') {
+                const parsed = parseOptionalU64String(
+                  val,
+                  `${ch.name}_bot_${slot}_${f.yamlKey}`,
+                )
+                if (parsed !== null) {
+                  fields[f.yamlKey] = parsed
+                }
               } else {
                 fields[f.yamlKey] = val
               }
@@ -3002,6 +2964,7 @@ function App() {
                       <Text size="1" color="gray" className="px-2 pt-1 uppercase tracking-wide">Runtime</Text>
                       <Tabs.Trigger value="general" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">⚙️  General</Tabs.Trigger>
                       <Tabs.Trigger value="model" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">🧠  Model</Tabs.Trigger>
+                      <Tabs.Trigger value="skills" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">🧩  Skills</Tabs.Trigger>
 
                       <Text size="1" color="gray" className="px-2 pt-3 uppercase tracking-wide">Channels</Text>
                       <Tabs.Trigger value="telegram" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">✈️  Telegram</Tabs.Trigger>
@@ -3274,6 +3237,13 @@ function App() {
                             />
                           </ConfigFieldCard>
                         </div>
+                      </div>
+                    </Tabs.Content>
+
+                    <Tabs.Content value="skills">
+                      <div className={sectionCardClass} style={sectionCardStyle}>
+                        <Text size="3" weight="bold">Skills</Text>
+                        <SkillsSettings />
                       </div>
                     </Tabs.Content>
 
@@ -3652,6 +3622,9 @@ function App() {
                                         <ConfigFieldCard key={stateKey} label={`${ch.name}_bot_${slot}_${f.yamlKey}`} description={<>{f.description}</>}>
                                           <TextField.Root
                                             className="mt-2"
+                                            type={f.valueType === 'number' ? 'number' : 'text'}
+                                            min={f.valueType === 'number' ? '0' : undefined}
+                                            step={f.valueType === 'number' ? '1' : undefined}
                                             value={String(configDraft[stateKey] || '')}
                                             onChange={(e) => setConfigField(stateKey, e.target.value)}
                                             placeholder={f.placeholder}

@@ -346,8 +346,12 @@ fn parse_boolish(value: &str, default_if_empty: bool) -> Result<bool, MicroClawE
 fn dynamic_field_is_bool(channel: &str, yaml_key: &str) -> bool {
     matches!(
         (channel, yaml_key),
-        ("feishu", "topic_mode" | "show_progress")
+        ("feishu", "topic_mode" | "show_progress") | ("slack", "capture_unmentioned_images")
     )
+}
+
+fn dynamic_field_is_u64(channel: &str, yaml_key: &str) -> bool {
+    matches!((channel, yaml_key), ("slack", "inbound_image_max_mb"))
 }
 
 fn parse_bot_count(value: &str, field_key: &str) -> Result<usize, MicroClawError> {
@@ -366,6 +370,18 @@ fn parse_bot_count(value: &str, field_key: &str) -> Result<usize, MicroClawError
         )));
     }
     Ok(parsed)
+}
+
+fn parse_u64_field(value: &str, field_key: &str) -> Result<u64, MicroClawError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(MicroClawError::Config(format!(
+            "{field_key} must be a positive integer"
+        )));
+    }
+    trimmed
+        .parse::<u64>()
+        .map_err(|_| MicroClawError::Config(format!("{field_key} must be a positive integer")))
 }
 
 fn parse_i64_list_field(value: &str, field_key: &str) -> Result<Vec<i64>, MicroClawError> {
@@ -1809,7 +1825,9 @@ impl SetupApp {
                                                         Some(trimmed.to_string())
                                                     }
                                                 } else {
-                                                    v.as_bool().map(|b| b.to_string())
+                                                    v.as_bool().map(|b| b.to_string()).or_else(
+                                                        || v.as_u64().map(|n| n.to_string()),
+                                                    )
                                                 }
                                             });
                                         if let Some(v) = value {
@@ -1877,7 +1895,9 @@ impl SetupApp {
                                                     Some(trimmed.to_string())
                                                 }
                                             } else {
-                                                v.as_bool().map(|b| b.to_string())
+                                                v.as_bool()
+                                                    .map(|b| b.to_string())
+                                                    .or_else(|| v.as_u64().map(|n| n.to_string()))
                                             }
                                         })
                                     });
@@ -4302,6 +4322,13 @@ fn save_config_yaml(
                         ))
                     })?;
                     account.insert(f.yaml_key.to_string(), serde_json::Value::Bool(parsed));
+                } else if dynamic_field_is_u64(ch.name, f.yaml_key) {
+                    let field_key = dynamic_slot_field_key(ch.name, slot, f.yaml_key);
+                    let parsed = parse_u64_field(v.trim(), &field_key)?;
+                    account.insert(
+                        f.yaml_key.to_string(),
+                        serde_json::Value::Number(serde_json::Number::from(parsed)),
+                    );
                 } else {
                     account.insert(
                         f.yaml_key.to_string(),
@@ -5329,7 +5356,7 @@ pub fn enable_sandbox_in_config() -> Result<String, MicroClawError> {
     cfg.sandbox.mode = SandboxMode::All;
     cfg.sandbox.backend = SandboxBackend::Auto;
     cfg.sandbox.no_network = true;
-    cfg.sandbox.require_runtime = false;
+    cfg.sandbox.require_runtime = true;
     cfg.save_yaml(&path.to_string_lossy())?;
     Ok(path.to_string_lossy().to_string())
 }
@@ -5558,6 +5585,7 @@ sandbox:
         assert!(out.contains(path.to_string_lossy().as_ref()));
         let cfg = Config::load().unwrap();
         assert!(matches!(cfg.sandbox.mode, SandboxMode::All));
+        assert!(cfg.sandbox.require_runtime);
         std::env::remove_var("MICROCLAW_CONFIG");
         let _ = std::fs::remove_file(path);
     }
@@ -5852,6 +5880,54 @@ sandbox:
         save_config_yaml(&yaml_path, &values).unwrap();
         let s = fs::read_to_string(&yaml_path).unwrap();
         assert!(s.contains("show_progress: true"));
+
+        let _ = fs::remove_file(&yaml_path);
+    }
+
+    #[test]
+    fn test_save_config_yaml_writes_slack_inbound_image_max_mb_as_number() {
+        let yaml_path = std::env::temp_dir().join(format!(
+            "microclaw_setup_slack_inbound_image_max_mb_test_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+
+        let mut values = HashMap::new();
+        values.insert("ENABLED_CHANNELS".into(), "slack".into());
+        values.insert(dynamic_bot_count_field_key("slack"), "1".into());
+        values.insert(dynamic_slot_id_field_key("slack", 1), "main".into());
+        values.insert(
+            dynamic_slot_field_key("slack", 1, "bot_token"),
+            "xoxb-token".into(),
+        );
+        values.insert(
+            dynamic_slot_field_key("slack", 1, "app_token"),
+            "xapp-token".into(),
+        );
+        values.insert(
+            dynamic_slot_field_key("slack", 1, "capture_unmentioned_images"),
+            "false".into(),
+        );
+        values.insert(
+            dynamic_slot_field_key("slack", 1, "inbound_image_max_mb"),
+            "20".into(),
+        );
+        values.insert("LLM_PROVIDER".into(), "anthropic".into());
+        values.insert("LLM_API_KEY".into(), "key".into());
+
+        save_config_yaml(&yaml_path, &values).unwrap();
+        let s = fs::read_to_string(&yaml_path).unwrap();
+        assert!(s.contains("capture_unmentioned_images: false"));
+        assert!(s.contains("inbound_image_max_mb: 20"));
+
+        let parsed: crate::config::Config = serde_yaml::from_str(&s).unwrap();
+        let slack = parsed
+            .channels
+            .get("slack")
+            .and_then(|v| v.get("accounts"))
+            .and_then(|v| v.get("main"))
+            .and_then(|v| v.get("inbound_image_max_mb"))
+            .and_then(|v| v.as_u64());
+        assert_eq!(slack, Some(20));
 
         let _ = fs::remove_file(&yaml_path);
     }

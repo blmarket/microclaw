@@ -17,6 +17,12 @@ impl ActivateSkillTool {
             skill_manager: SkillManager::from_skills_dir(skills_dir),
         }
     }
+
+    pub fn new_with_runtime(skills_dir: &str, runtime_dir: &str) -> Self {
+        ActivateSkillTool {
+            skill_manager: SkillManager::from_skills_and_runtime(skills_dir, runtime_dir),
+        }
+    }
 }
 
 #[async_trait]

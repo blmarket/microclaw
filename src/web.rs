@@ -33,6 +33,7 @@ mod config;
 mod metrics;
 mod middleware;
 mod sessions;
+mod skills;
 mod stream;
 use middleware::*;
 
@@ -1683,6 +1684,9 @@ fn build_router(web_state: WebState) -> Router {
         .route("/api/run_status", get(stream::api_run_status))
         .route("/api/reset", post(sessions::api_reset))
         .route("/api/delete_session", post(sessions::api_delete_session))
+        .route("/api/skills", get(skills::api_list_skills))
+        .route("/api/skills/:name/enable", post(skills::api_enable_skill))
+        .route("/api/skills/:name/disable", post(skills::api_disable_skill))
         .with_state(web_state)
 }
 

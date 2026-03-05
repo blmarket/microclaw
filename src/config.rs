@@ -51,16 +51,17 @@ fn default_memory_token_budget() -> usize {
 fn default_data_dir() -> String {
     default_data_root().to_string_lossy().to_string()
 }
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+
+/// Expands a path string, replacing `~` with the user's home directory.
+fn expand_path(path: &str) -> PathBuf {
+    match shellexpand::tilde(path) {
+        std::borrow::Cow::Borrowed(p) => PathBuf::from(p),
+        std::borrow::Cow::Owned(p) => PathBuf::from(p),
+    }
 }
 
 fn default_data_root() -> PathBuf {
-    home_dir()
-        .map(|h| h.join(".microclaw"))
-        .unwrap_or_else(|| PathBuf::from(".microclaw"))
+    expand_path("~/.microclaw")
 }
 
 fn default_working_dir() -> String {
@@ -616,15 +617,17 @@ impl Config {
 
     /// Data root directory from config.
     pub fn data_root_dir(&self) -> PathBuf {
-        PathBuf::from(&self.data_dir)
+        expand_path(&self.data_dir)
     }
 
     /// Runtime data directory (db, memory, exports, etc.).
     pub fn runtime_data_dir(&self) -> String {
-        self.data_root_dir()
-            .join("runtime")
-            .to_string_lossy()
-            .to_string()
+        let root = self.data_root_dir();
+        // Avoid nested runtime/runtime if data_dir is already runtime
+        if root.file_name().and_then(|n| n.to_str()) == Some("runtime") {
+            return root.to_string_lossy().to_string();
+        }
+        root.join("runtime").to_string_lossy().to_string()
     }
 
     /// Skills directory. Priority: MICROCLAW_SKILLS_DIR env var > skills_dir config > <data_dir>/skills
@@ -633,14 +636,14 @@ impl Config {
         if let Ok(explicit_dir) = std::env::var("MICROCLAW_SKILLS_DIR") {
             let trimmed = explicit_dir.trim();
             if !trimmed.is_empty() {
-                return trimmed.to_string();
+                return expand_path(trimmed).to_string_lossy().to_string();
             }
         }
         // 2. Check config file
         if let Some(configured) = &self.skills_dir {
             let trimmed = configured.trim();
             if !trimmed.is_empty() {
-                return trimmed.to_string();
+                return expand_path(trimmed).to_string_lossy().to_string();
             }
         }
         // 3. Default to <data_dir>/skills
@@ -655,7 +658,7 @@ impl Config {
         if let Some(configured) = &self.souls_dir {
             let trimmed = configured.trim();
             if !trimmed.is_empty() {
-                return trimmed.to_string();
+                return expand_path(trimmed).to_string_lossy().to_string();
             }
         }
         self.data_root_dir()
@@ -671,8 +674,9 @@ impl Config {
     pub fn resolve_config_path() -> Result<Option<PathBuf>, MicroClawError> {
         // 1. Check MICROCLAW_CONFIG env var for custom path
         if let Ok(custom) = std::env::var("MICROCLAW_CONFIG") {
-            if std::path::Path::new(&custom).exists() {
-                return Ok(Some(PathBuf::from(custom)));
+            let expanded = expand_path(&custom);
+            if expanded.exists() {
+                return Ok(Some(expanded));
             }
             return Err(MicroClawError::Config(format!(
                 "MICROCLAW_CONFIG points to non-existent file: {custom}"
@@ -838,7 +842,7 @@ impl Config {
             self.skills_dir = if trimmed.is_empty() {
                 None
             } else {
-                Some(trimmed)
+                Some(expand_path(&trimmed).to_string_lossy().to_string())
             };
         }
         if let Some(dir) = &self.souls_dir {
@@ -846,7 +850,7 @@ impl Config {
             self.souls_dir = if trimmed.is_empty() {
                 None
             } else {
-                Some(trimmed)
+                Some(expand_path(&trimmed).to_string_lossy().to_string())
             };
         }
         if let Some(dir) = &self.plugins.dir {
@@ -854,12 +858,15 @@ impl Config {
             self.plugins.dir = if trimmed.is_empty() {
                 None
             } else {
-                Some(trimmed)
+                Some(expand_path(&trimmed).to_string_lossy().to_string())
             };
         }
         if self.working_dir.trim().is_empty() {
             self.working_dir = default_working_dir();
+        } else {
+            self.working_dir = expand_path(&self.working_dir).to_string_lossy().to_string();
         }
+        self.data_dir = expand_path(&self.data_dir).to_string_lossy().to_string();
         self.sandbox.image = self.sandbox.image.trim().to_string();
         if self.sandbox.image.is_empty() {
             self.sandbox.image = default_sandbox_image();
@@ -1474,6 +1481,7 @@ voice_transcription_command: "whisper-mlx --file {file}"
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(matches!(config.sandbox.mode, SandboxMode::Off));
         assert!(matches!(config.sandbox.backend, SandboxBackend::Auto));
+        assert!(config.sandbox.require_runtime);
         assert_eq!(config.sandbox.image, "ubuntu:25.10");
     }
 
@@ -1574,21 +1582,13 @@ voice_transcription_command: "whisper-mlx --file {file}"
     #[test]
     fn test_runtime_and_skills_dirs_from_runtime_data_dir() {
         let mut config = test_config();
-        config.data_dir = "./microclaw.data/runtime".into();
+        config.data_dir = "./microclaw.data".into();
 
         let runtime = std::path::PathBuf::from(config.runtime_data_dir());
         let skills = std::path::PathBuf::from(config.skills_data_dir());
 
-        assert!(runtime.ends_with(
-            std::path::Path::new("microclaw.data")
-                .join("runtime")
-                .join("runtime")
-        ));
-        assert!(skills.ends_with(
-            std::path::Path::new("microclaw.data")
-                .join("runtime")
-                .join("skills")
-        ));
+        assert!(runtime.ends_with(std::path::Path::new("microclaw.data").join("runtime")));
+        assert!(skills.ends_with(std::path::Path::new("microclaw.data").join("skills")));
     }
 
     #[test]
@@ -2050,5 +2050,40 @@ discord_allowed_channels: [111, 222]
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("telegram_bot_token"));
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_expand_path_with_tilde() {
+        let home = PathBuf::from(shellexpand::tilde("~").as_ref());
+        let path = "~/foo/bar";
+        let expanded = expand_path(path);
+        assert_eq!(expanded, home.join("foo/bar"));
+
+        let path = "~";
+        let expanded = expand_path(path);
+        assert_eq!(expanded, home);
+
+        let path = "/absolute/path";
+        let expanded = expand_path(path);
+        assert_eq!(expanded, std::path::PathBuf::from("/absolute/path"));
+    }
+
+    #[test]
+    fn test_post_deserialize_expands_paths() {
+        let mut config = test_config();
+        config.data_dir = "~/.microclaw".into();
+        config.working_dir = "~/workspace".into();
+        config.skills_dir = Some("~/skills".into());
+
+        config.post_deserialize().unwrap();
+
+        let home = PathBuf::from(shellexpand::tilde("~").as_ref());
+        // Use PathBuf comparison to handle separator differences on Windows
+        assert_eq!(PathBuf::from(&config.data_dir), home.join(".microclaw"));
+        assert_eq!(PathBuf::from(&config.working_dir), home.join("workspace"));
+        assert_eq!(
+            PathBuf::from(config.skills_dir.unwrap()),
+            home.join("skills")
+        );
     }
 }

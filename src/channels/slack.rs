@@ -57,6 +57,20 @@ pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
             secret: false,
             required: false,
         },
+        ChannelFieldDef {
+            yaml_key: "capture_unmentioned_images",
+            label: "Capture images without mention (true/false)",
+            default: "false",
+            secret: false,
+            required: false,
+        },
+        ChannelFieldDef {
+            yaml_key: "inbound_image_max_mb",
+            label: "Max inbound image size in MB (optional)",
+            default: "20",
+            secret: false,
+            required: false,
+        },
     ],
 };
 
@@ -70,12 +84,44 @@ pub struct SlackAccountConfig {
     pub bot_username: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub capture_unmentioned_images: Option<bool>,
+    #[serde(default)]
+    pub inbound_image_max_mb: Option<u64>,
+    #[serde(default)]
+    pub inbound_image_max_bytes: Option<u64>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_slack_capture_unmentioned_images() -> bool {
+    false
+}
+
+fn default_slack_inbound_image_max_mb() -> u64 {
+    20
+}
+
+fn mb_to_bytes(mb: u64) -> u64 {
+    mb.saturating_mul(1024 * 1024)
+}
+
+fn normalize_slack_inbound_image_max_mb(max_mb: u64) -> u64 {
+    if max_mb == 0 {
+        return default_slack_inbound_image_max_mb();
+    }
+    max_mb
+}
+
+fn normalize_slack_inbound_image_max_bytes(max_bytes: u64) -> u64 {
+    if max_bytes == 0 {
+        return mb_to_bytes(default_slack_inbound_image_max_mb());
+    }
+    max_bytes
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,6 +134,12 @@ pub struct SlackChannelConfig {
     pub allowed_channels: Vec<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default = "default_slack_capture_unmentioned_images")]
+    pub capture_unmentioned_images: bool,
+    #[serde(default = "default_slack_inbound_image_max_mb")]
+    pub inbound_image_max_mb: u64,
+    #[serde(default)]
+    pub inbound_image_max_bytes: Option<u64>,
     #[serde(default)]
     pub accounts: HashMap<String, SlackAccountConfig>,
     #[serde(default)]
@@ -153,6 +205,20 @@ pub fn build_slack_runtime_contexts(config: &crate::config::Config) -> Vec<Slack
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(ToOwned::to_owned);
+        let capture_unmentioned_images = account_cfg
+            .capture_unmentioned_images
+            .unwrap_or(slack_cfg.capture_unmentioned_images);
+        let inbound_image_max_bytes = if let Some(mb) = account_cfg.inbound_image_max_mb {
+            mb_to_bytes(normalize_slack_inbound_image_max_mb(mb))
+        } else if let Some(bytes) = account_cfg.inbound_image_max_bytes {
+            normalize_slack_inbound_image_max_bytes(bytes)
+        } else if let Some(bytes) = slack_cfg.inbound_image_max_bytes {
+            normalize_slack_inbound_image_max_bytes(bytes)
+        } else {
+            mb_to_bytes(normalize_slack_inbound_image_max_mb(
+                slack_cfg.inbound_image_max_mb,
+            ))
+        };
         runtimes.push(SlackRuntimeContext {
             channel_name,
             app_token: account_cfg.app_token.clone(),
@@ -160,6 +226,8 @@ pub fn build_slack_runtime_contexts(config: &crate::config::Config) -> Vec<Slack
             allowed_channels: account_cfg.allowed_channels.clone(),
             bot_username,
             model,
+            capture_unmentioned_images,
+            inbound_image_max_bytes,
         });
     }
 
@@ -179,6 +247,15 @@ pub fn build_slack_runtime_contexts(config: &crate::config::Config) -> Vec<Slack
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .map(ToOwned::to_owned),
+            capture_unmentioned_images: slack_cfg.capture_unmentioned_images,
+            inbound_image_max_bytes: slack_cfg
+                .inbound_image_max_bytes
+                .map(normalize_slack_inbound_image_max_bytes)
+                .unwrap_or_else(|| {
+                    mb_to_bytes(normalize_slack_inbound_image_max_mb(
+                        slack_cfg.inbound_image_max_mb,
+                    ))
+                }),
         });
     }
 
@@ -232,10 +309,7 @@ fn remember_assistant_thread(channel: &str, user: &str, thread_ts: &str) {
     let Ok(mut guard) = cache.lock() else {
         return;
     };
-    guard.insert(
-        slack_assistant_key(channel, user),
-        thread_ts.to_string(),
-    );
+    guard.insert(slack_assistant_key(channel, user), thread_ts.to_string());
 }
 
 fn resolve_assistant_thread(channel: &str, user: &str) -> Option<String> {
@@ -327,6 +401,7 @@ fn should_skip_slack_message_subtype(subtype: Option<&str>) -> bool {
     match subtype {
         None => false,
         Some("thread_broadcast") | Some("reply_broadcast") => false,
+        Some("file_share") => false, // file/image attachments from users
         Some(_) => true,
     }
 }
@@ -540,6 +615,89 @@ async fn resolve_bot_user_id(bot_token: &str) -> Result<String, String> {
 }
 
 /// Send a text response to a Slack channel, splitting at 4000 chars.
+/// Download the first image from a Slack `files` array and return it as (base64, media_type).
+/// Slack requires the bot token as a Bearer header to access `url_private`.
+async fn download_first_slack_image(
+    bot_token: &str,
+    files: &[serde_json::Value],
+    max_bytes: u64,
+) -> Option<(String, String)> {
+    for file in files {
+        let mimetype = file.get("mimetype").and_then(|v| v.as_str()).unwrap_or("");
+        if !mimetype.starts_with("image/") {
+            continue;
+        }
+        let url = file
+            .get("url_private")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if url.is_empty() {
+            continue;
+        }
+        let client = reqwest::Client::new();
+        match client
+            .get(url)
+            .header("Authorization", format!("Bearer {bot_token}"))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                if let Some(content_length) = resp.content_length() {
+                    if content_length > max_bytes {
+                        warn!(
+                            "Slack: skipping image download; content-length={} exceeds max_bytes={}",
+                            content_length, max_bytes
+                        );
+                        continue;
+                    }
+                }
+                match resp.bytes().await {
+                    Ok(bytes) => {
+                        if bytes.len() as u64 > max_bytes {
+                            warn!(
+                                "Slack: skipping image; size={} exceeds max_bytes={}",
+                                bytes.len(),
+                                max_bytes
+                            );
+                            continue;
+                        }
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let media_type = guess_slack_image_media_type(&bytes, mimetype);
+                        return Some((b64, media_type));
+                    }
+                    Err(e) => {
+                        warn!("Slack: failed to read image bytes: {e}");
+                    }
+                }
+            }
+            Ok(resp) => {
+                warn!("Slack: image download returned HTTP {}", resp.status());
+            }
+            Err(e) => {
+                warn!("Slack: failed to download image: {e}");
+            }
+        }
+    }
+    None
+}
+
+fn guess_slack_image_media_type(data: &[u8], mimetype: &str) -> String {
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png".into()
+    } else if data.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg".into()
+    } else if data.starts_with(b"GIF") {
+        "image/gif".into()
+    } else if data.starts_with(b"RIFF") && data.len() >= 12 && &data[8..12] == b"WEBP" {
+        "image/webp".into()
+    } else if !mimetype.is_empty() {
+        mimetype.into()
+    } else {
+        "image/jpeg".into()
+    }
+}
+
 async fn send_slack_response(
     bot_token: &str,
     channel: &str,
@@ -597,6 +755,8 @@ pub struct SlackRuntimeContext {
     pub allowed_channels: Vec<String>,
     pub bot_username: String,
     pub model: Option<String>,
+    pub capture_unmentioned_images: bool,
+    pub inbound_image_max_bytes: u64,
 }
 
 pub async fn start_slack_bot(app_state: Arc<AppState>, runtime: SlackRuntimeContext) {
@@ -744,7 +904,23 @@ async fn run_socket_mode(
                             .unwrap_or("")
                             .to_string();
 
-                        if channel.is_empty() || text_content.is_empty() {
+                        // Extract inbound file attachments (images)
+                        let files: Vec<serde_json::Value> = event
+                            .get("files")
+                            .and_then(|f| f.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+
+                        info!(
+                            "Slack event: channel={} text={:?} files={} subtype={:?} event_type={}",
+                            channel,
+                            text_content,
+                            files.len(),
+                            subtype,
+                            event_type
+                        );
+
+                        if channel.is_empty() || (text_content.is_empty() && files.is_empty()) {
                             continue;
                         }
                         if thread_ts.is_none() && is_dm {
@@ -770,6 +946,7 @@ async fn run_socket_mode(
                                 is_app_mention,
                                 thread_ts.as_deref(),
                                 &ts,
+                                files,
                             )
                             .await;
                         });
@@ -804,6 +981,7 @@ async fn handle_slack_message(
     is_app_mention: bool,
     thread_ts: Option<&str>,
     ts: &str,
+    files: Vec<serde_json::Value>,
 ) {
     let normalized_thread_ts = normalize_slack_thread_ts(thread_ts);
     let external_chat_id = slack_external_chat_id(channel, normalized_thread_ts);
@@ -859,7 +1037,11 @@ async fn handle_slack_message(
     // In group chats, only addressed messages should enter session history.
     // Otherwise old non-mention chatter leaks into context once a later mention arrives.
     if !should_respond && !is_slash {
-        return;
+        let allow_unmentioned_image_capture =
+            runtime.capture_unmentioned_images && !files.is_empty() && !is_dm;
+        if !allow_unmentioned_image_capture {
+            return;
+        }
     }
 
     if is_slash {
@@ -895,6 +1077,16 @@ async fn handle_slack_message(
         .await;
         return;
     }
+
+    // Download the first image attachment (if any) for vision input.
+    // For group messages without mention, this is gated by `capture_unmentioned_images`.
+    let should_download_image =
+        !files.is_empty() && (should_respond || is_dm || runtime.capture_unmentioned_images);
+    let image_data = if should_download_image {
+        download_first_slack_image(bot_token, &files, runtime.inbound_image_max_bytes).await
+    } else {
+        None
+    };
 
     let chat_lock = slack_chat_lock(&runtime.channel_name, &external_chat_id);
     let _guard = chat_lock.lock().await;
@@ -938,7 +1130,7 @@ async fn handle_slack_message(
             chat_type: if is_dm { "private" } else { "group" },
         },
         None,
-        None,
+        image_data,
         Some(&event_tx),
     )
     .await
@@ -1077,6 +1269,89 @@ commands:
     fn test_should_skip_slack_message_subtype_skips_other_variants() {
         assert!(should_skip_slack_message_subtype(Some("message_changed")));
         assert!(should_skip_slack_message_subtype(Some("bot_message")));
+    }
+
+    #[test]
+    fn test_should_skip_slack_message_subtype_allows_file_share() {
+        assert!(!should_skip_slack_message_subtype(Some("file_share")));
+    }
+
+    #[test]
+    fn test_guess_slack_image_media_type_from_magic_bytes() {
+        // PNG magic bytes
+        assert_eq!(
+            guess_slack_image_media_type(&[0x89, 0x50, 0x4E, 0x47, 0x0D], "image/png"),
+            "image/png"
+        );
+        // JPEG magic bytes
+        assert_eq!(
+            guess_slack_image_media_type(&[0xFF, 0xD8, 0x00], "image/jpeg"),
+            "image/jpeg"
+        );
+        // Falls back to mimetype for unknown bytes
+        assert_eq!(
+            guess_slack_image_media_type(&[0x00, 0x01, 0x02], "image/webp"),
+            "image/webp"
+        );
+        // Falls back to jpeg for truly unknown
+        assert_eq!(
+            guess_slack_image_media_type(&[0x00, 0x01, 0x02], ""),
+            "image/jpeg"
+        );
+    }
+
+    #[test]
+    fn test_slack_channel_config_defaults_for_image_capture_settings() {
+        let cfg: SlackChannelConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!cfg.capture_unmentioned_images);
+        assert_eq!(cfg.inbound_image_max_mb, 20);
+    }
+
+    #[test]
+    fn test_build_slack_runtime_contexts_account_overrides_image_capture_settings() {
+        let mut cfg = crate::config::Config::test_defaults();
+        cfg.channels.insert(
+            "slack".to_string(),
+            serde_yaml::from_str(
+                r#"
+capture_unmentioned_images: false
+inbound_image_max_mb: 1
+accounts:
+  default:
+    bot_token: xoxb-account
+    app_token: xapp-account
+    capture_unmentioned_images: true
+    inbound_image_max_mb: 2
+"#,
+            )
+            .unwrap(),
+        );
+
+        let runtimes = build_slack_runtime_contexts(&cfg);
+        assert_eq!(runtimes.len(), 1);
+        assert!(runtimes[0].capture_unmentioned_images);
+        assert_eq!(runtimes[0].inbound_image_max_bytes, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_build_slack_runtime_contexts_image_limit_uses_default_when_zero() {
+        let mut cfg = crate::config::Config::test_defaults();
+        cfg.channels.insert(
+            "slack".to_string(),
+            serde_yaml::from_str(
+                r#"
+bot_token: xoxb-top
+app_token: xapp-top
+capture_unmentioned_images: false
+inbound_image_max_mb: 0
+"#,
+            )
+            .unwrap(),
+        );
+
+        let runtimes = build_slack_runtime_contexts(&cfg);
+        assert_eq!(runtimes.len(), 1);
+        assert_eq!(runtimes[0].inbound_image_max_bytes, 20 * 1024 * 1024);
     }
 
     #[test]

@@ -12,7 +12,7 @@ resolver = "2"
 
 [package]
 name = "microclaw"
-version = "0.0.137"
+version = "0.0.153"
 edition = "2021"
 license = "MIT"
 default-run = "microclaw"
@@ -71,6 +71,7 @@ rmcp = { version = "1.1", features = [
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
 ] }
+shellexpand = "3.1.2"
 
 [dev-dependencies]
 tower = "0.5"

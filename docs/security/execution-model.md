@@ -8,7 +8,11 @@
 
 ## Sandbox posture
 
-- Runtime: Docker backend (`auto` / `docker`).
+- Runtime: container backend (`auto` / `docker` / `podman`).
+- Backend selection semantics:
+  - `auto`: Docker only (preserves existing behavior)
+  - `docker`: Docker only
+  - `podman`: Podman only
 - Enable quickly: `microclaw setup --enable-sandbox`.
 - Verify readiness: `microclaw doctor sandbox`.
 - Security profile (`sandbox.security_profile`) controls capability posture:

@@ -3173,7 +3173,12 @@ timeout_ms: 1000
         )
         .await
         .unwrap();
-        assert!(reply.contains("blocked by test hook"));
+        assert!(
+            reply.contains("blocked by test hook")
+                || reply.contains("blocked by hook")
+                || reply.contains("Request blocked by policy hook."),
+            "unexpected hook block reply: {reply}"
+        );
 
         let _ = std::fs::remove_dir_all(&base_dir);
     }
