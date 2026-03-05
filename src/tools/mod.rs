@@ -47,7 +47,7 @@ impl ToolRegistry {
     fn should_inject_default_chat_id(tool_name: &str) -> bool {
         matches!(
             tool_name,
-            "write_memory" | "read_memory" | "todo_read" | "todo_write"
+            "write_memory" | "read_memory" | "todo_read" | "todo_write" | "send_message"
         )
     }
 
@@ -783,5 +783,32 @@ tools:
         assert!(!result.is_error);
         let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(payload["chat_id"].as_i64(), Some(42));
+    }
+
+    #[tokio::test]
+    async fn test_injects_default_chat_id_for_send_message_tool() {
+        let registry = ToolRegistry {
+            config: crate::config::Config::test_defaults(),
+            sandbox_mode: SandboxMode::Off,
+            sandbox_runtime_available: false,
+            cached_static_definitions: OnceLock::new(),
+            tools: vec![Box::new(CaptureInputTool {
+                tool_name: "send_message".into(),
+            })],
+        };
+        let auth = ToolAuthContext {
+            caller_channel: "web".into(),
+            caller_chat_id: 9001,
+            control_chat_ids: vec![],
+            env_files: vec![],
+        };
+
+        let result = registry
+            .execute_with_auth("send_message", json!({"text":"progress update"}), &auth)
+            .await;
+        assert!(!result.is_error);
+        let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["chat_id"].as_i64(), Some(9001));
+        assert_eq!(payload["text"].as_str(), Some("progress update"));
     }
 }
