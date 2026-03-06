@@ -730,8 +730,7 @@ fn hide_windows_subprocess_window_tokio(cmd: &mut tokio::process::Command) {
 
 #[cfg(windows)]
 fn hide_windows_subprocess_window_std(cmd: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    std::os::windows::process::CommandExt::creation_flags(cmd, CREATE_NO_WINDOW);
 }
 
 /// Resolve a command name to its full path.
