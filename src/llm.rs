@@ -581,14 +581,12 @@ fn process_openai_stream_event(
     }
 
     if let Some(tc_arr) = delta.get("tool_calls").and_then(|v| v.as_array()) {
-        for tc in tc_arr {
-            let Some(index) = tc
+        for (arr_pos, tc) in tc_arr.iter().enumerate() {
+            let index = tc
                 .get("index")
                 .and_then(|i| i.as_u64())
                 .and_then(|i| usize::try_from(i).ok())
-            else {
-                continue;
-            };
+                .unwrap_or(arr_pos);
             let entry = tool_calls.entry(index).or_default();
             if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                 entry.id = id.to_string();
@@ -597,8 +595,11 @@ fn process_openai_stream_event(
                 if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
                     entry.name = name.to_string();
                 }
-                if let Some(args) = function.get("arguments").and_then(|v| v.as_str()) {
-                    entry.input_json.push_str(args);
+                if let Some(args) = function.get("arguments") {
+                    match args {
+                        serde_json::Value::String(s) => entry.input_json.push_str(s),
+                        other => entry.input_json.push_str(&other.to_string()),
+                    }
                 }
                 if let Some(sig) = function.get("thought_signature").and_then(|v| v.as_str()) {
                     entry.thought_signature = Some(sig.to_string());
@@ -623,6 +624,12 @@ fn parse_tool_input(input_json: &str) -> serde_json::Value {
         return json!({});
     }
     serde_json::from_str(trimmed).unwrap_or_else(|_| json!({}))
+}
+
+fn has_tool_use_block(content: &[ResponseContentBlock]) -> bool {
+    content
+        .iter()
+        .any(|b| matches!(b, ResponseContentBlock::ToolUse { .. }))
 }
 
 fn combine_visible_and_reasoning_text(visible: &str, reasoning: &str) -> String {
@@ -667,9 +674,15 @@ fn build_stream_response(
         });
     }
 
+    let mut normalized_stop_reason = normalize_stop_reason(stop_reason);
+    if normalized_stop_reason.as_deref() == Some("tool_use") && !has_tool_use_block(&content) {
+        warn!("Downgrading stop_reason=tool_use to end_turn because no tool_calls were parsed");
+        normalized_stop_reason = Some("end_turn".into());
+    }
+
     MessagesResponse {
         content,
-        stop_reason: normalize_stop_reason(stop_reason),
+        stop_reason: normalized_stop_reason,
         usage,
     }
 }
@@ -2038,11 +2051,15 @@ fn translate_oai_response(oai: OaiResponse) -> MessagesResponse {
         });
     }
 
-    let stop_reason = match choice.finish_reason.as_deref() {
+    let mut stop_reason = match choice.finish_reason.as_deref() {
         Some("tool_calls") => Some("tool_use".into()),
         Some("length") => Some("max_tokens".into()),
         _ => Some("end_turn".into()),
     };
+    if stop_reason.as_deref() == Some("tool_use") && !has_tool_use_block(&content) {
+        warn!("Downgrading stop_reason=tool_use to end_turn because response had no tool_calls");
+        stop_reason = Some("end_turn".into());
+    }
 
     let usage = oai.usage.map(|u| Usage {
         input_tokens: u.prompt_tokens,
@@ -2448,6 +2465,30 @@ mod tests {
     }
 
     #[test]
+    fn test_translate_oai_response_tool_calls_without_calls_downgrades_to_end_turn() {
+        let oai = OaiResponse {
+            choices: vec![OaiChoice {
+                message: OaiMessage {
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        };
+
+        let resp = translate_oai_response(oai);
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert!(
+            !resp
+                .content
+                .iter()
+                .any(|b| matches!(b, ResponseContentBlock::ToolUse { .. }))
+        );
+    }
+
+    #[test]
     fn test_translate_oai_response_empty_choices() {
         let oai = OaiResponse {
             choices: vec![],
@@ -2590,6 +2631,24 @@ mod tests {
     }
 
     #[test]
+    fn test_build_stream_response_tool_calls_without_blocks_downgrades_to_end_turn() {
+        let resp = build_stream_response(
+            vec![],
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            Some("tool_calls".into()),
+            None,
+        );
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert!(
+            !resp
+                .content
+                .iter()
+                .any(|b| matches!(b, ResponseContentBlock::ToolUse { .. }))
+        );
+    }
+
+    #[test]
     fn test_process_openai_stream_event_collects_reasoning_content() {
         let data = r#"{"choices":[{"delta":{"reasoning_content":"think","tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"ls\"}","thought_signature":"sig_123"}}]},"finish_reason":null}],"usage":null}"#;
         let mut text = String::new();
@@ -2642,6 +2701,34 @@ mod tests {
         assert_eq!(stop_reason, None);
         assert!(usage.is_none());
         assert!(tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_process_openai_stream_event_tool_calls_without_index_and_object_args() {
+        let data = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_1","function":{"name":"weather","arguments":{"location":"Shanghai"}}}]}}]}"#;
+        let mut text = String::new();
+        let mut reasoning_text = String::new();
+        let mut stop_reason = None;
+        let mut usage = None;
+        let mut tool_calls = std::collections::BTreeMap::new();
+
+        process_openai_stream_event(
+            data,
+            None,
+            &mut text,
+            &mut reasoning_text,
+            &mut stop_reason,
+            &mut usage,
+            &mut tool_calls,
+        );
+
+        assert!(text.is_empty());
+        assert!(reasoning_text.is_empty());
+        assert_eq!(stop_reason, None);
+        let call = tool_calls.get(&0).unwrap();
+        assert_eq!(call.id, "call_1");
+        assert_eq!(call.name, "weather");
+        assert_eq!(call.input_json, r#"{"location":"Shanghai"}"#);
     }
 
     #[test]

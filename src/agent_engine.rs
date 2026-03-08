@@ -180,6 +180,49 @@ fn truncate_for_log(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn summarize_tool_uses_for_log(
+    blocks: &[ResponseContentBlock],
+    max_calls: usize,
+    max_input_chars: usize,
+    max_total_chars: usize,
+) -> String {
+    let tool_uses: Vec<(&str, &Value)> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ResponseContentBlock::ToolUse { name, input, .. } => Some((name.as_str(), input)),
+            _ => None,
+        })
+        .collect();
+    if tool_uses.is_empty() {
+        return String::new();
+    }
+
+    let total = tool_uses.len();
+    let mut parts = Vec::new();
+    for (name, input) in tool_uses.iter().take(max_calls) {
+        let input_preview = truncate_for_log(&input.to_string(), max_input_chars);
+        parts.push(format!("{name}({input_preview})"));
+    }
+    if total > max_calls {
+        parts.push(format!("... +{} more", total - max_calls));
+    }
+    truncate_for_log(&parts.join("; "), max_total_chars)
+}
+
+fn tool_use_fingerprint(blocks: &[ResponseContentBlock]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for block in blocks {
+        if let ResponseContentBlock::ToolUse { name, input, .. } = block {
+            parts.push(format!("{name}:{input}"));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("|"))
+    }
+}
+
 fn format_failed_action_for_user(tool_name: &str, input: &Value, result_content: &str) -> String {
     let error_summary = summarize_for_user_note(result_content, 140);
     if tool_name == "bash" {
@@ -776,6 +819,9 @@ pub(crate) async fn process_with_agent_impl(
         None
     };
     let mut consecutive_send_message_calls: usize = 0;
+    let mut last_tool_use_fingerprint: Option<String> = None;
+    let mut repeated_tool_use_streak: usize = 0;
+    const MAX_IDENTICAL_TOOL_USE_STREAK: usize = 6;
     for iteration in 0..state.config.max_tool_iterations {
         if let Some(tx) = event_tx {
             let _ = tx.send(AgentEvent::Iteration {
@@ -896,13 +942,69 @@ pub(crate) async fn process_with_agent_impl(
             .as_ref()
             .map(|u| (u.input_tokens, u.output_tokens))
             .unwrap_or((0, 0));
+        if stop_reason == "tool_use" {
+            let current_fingerprint = tool_use_fingerprint(&response.content);
+            if current_fingerprint.is_some() && current_fingerprint == last_tool_use_fingerprint {
+                repeated_tool_use_streak += 1;
+            } else {
+                repeated_tool_use_streak = usize::from(current_fingerprint.is_some());
+            }
+            last_tool_use_fingerprint = current_fingerprint;
 
+            if repeated_tool_use_streak >= MAX_IDENTICAL_TOOL_USE_STREAK {
+                let repeated_calls = summarize_tool_uses_for_log(&response.content, 3, 200, 1200);
+                warn!(
+                    chat_id,
+                    iteration = iteration + 1,
+                    repeated_tool_use_streak,
+                    tool_calls = %repeated_calls,
+                    "Detected repeated identical tool_use turns; aborting loop"
+                );
+                let text = format!(
+                    "I stopped because the model repeated the same tool calls {repeated_tool_use_streak} times in a row. Please rephrase your request or ask me to continue with a specific next step."
+                );
+                messages.push(Message {
+                    role: "assistant".into(),
+                    content: MessageContent::Text(text.clone()),
+                });
+                persist_session_with_skill_env_files(
+                    state,
+                    chat_id,
+                    &mut messages,
+                    &skill_env_files,
+                )
+                .await;
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(AgentEvent::FinalResponse { text: text.clone() });
+                }
+                return Ok(text);
+            }
+        } else {
+            last_tool_use_fingerprint = None;
+            repeated_tool_use_streak = 0;
+        }
+        let tool_calls = if stop_reason == "tool_use" {
+            summarize_tool_uses_for_log(&response.content, 3, 200, 1200)
+        } else {
+            String::new()
+        };
+        let tool_calls_for_log = if stop_reason == "tool_use" {
+            if tool_calls.is_empty() {
+                "<none>".to_string()
+            } else {
+                tool_calls
+            }
+        } else {
+            String::new()
+        };
         info!(
             chat_id,
             iteration = iteration + 1,
             stop_reason,
             input_tokens = in_tok,
             output_tokens = out_tok,
+            repeated_tool_use_streak,
+            tool_calls = %tool_calls_for_log,
             "Agent iteration completed"
         );
 
@@ -1033,6 +1135,51 @@ pub(crate) async fn process_with_agent_impl(
         }
 
         if stop_reason == "tool_use" {
+            let tool_use_count = response
+                .content
+                .iter()
+                .filter(|block| matches!(block, ResponseContentBlock::ToolUse { .. }))
+                .count();
+            if tool_use_count == 0 {
+                let text = response
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ResponseContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                let final_text = if text.trim().is_empty() {
+                    "I stopped because the model returned stop_reason=tool_use without any executable tool calls. Please try again."
+                        .to_string()
+                } else {
+                    text.clone()
+                };
+                warn!(
+                    chat_id,
+                    iteration = iteration + 1,
+                    preview = truncate_for_log(&text, 300),
+                    "Invalid model response: stop_reason=tool_use but no tool calls; ending turn"
+                );
+                messages.push(Message {
+                    role: "assistant".into(),
+                    content: MessageContent::Text(final_text.clone()),
+                });
+                persist_session_with_skill_env_files(
+                    state,
+                    chat_id,
+                    &mut messages,
+                    &skill_env_files,
+                )
+                .await;
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(AgentEvent::FinalResponse {
+                        text: final_text.clone(),
+                    });
+                }
+                return Ok(final_text);
+            }
             let assistant_content: Vec<ContentBlock> = response
                 .content
                 .iter()
@@ -2850,6 +2997,10 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    struct ToolUseWithoutCallThenLoopLlm {
+        calls: Arc<AtomicUsize>,
+    }
+
     #[async_trait::async_trait]
     impl LlmProvider for HighRiskNeedsUserConfirmLlm {
         async fn send_message(
@@ -2997,6 +3148,25 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl LlmProvider for ToolUseWithoutCallThenLoopLlm {
+        async fn send_message(
+            &self,
+            _system: &str,
+            _messages: Vec<Message>,
+            _tools: Option<Vec<ToolDefinition>>,
+        ) -> Result<MessagesResponse, MicroClawError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(MessagesResponse {
+                content: vec![ResponseContentBlock::Text {
+                    text: "tool_use without calls".to_string(),
+                }],
+                stop_reason: Some("tool_use".to_string()),
+                usage: None,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn test_high_risk_tool_waits_for_user_confirmation_when_enabled() {
         let base_dir =
@@ -3109,6 +3279,44 @@ mod tests {
         assert_eq!(reply, "recovered after malformed tool call");
         assert!(!reply.contains("Execution note: some tool actions failed"));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_stop_reason_tool_use_without_tool_calls_finishes_immediately() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "mc_agent_tool_use_without_calls_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let llm = ToolUseWithoutCallThenLoopLlm {
+            calls: calls.clone(),
+        };
+        let state = test_state_with_llm(&base_dir, Box::new(llm));
+        let chat_id = state
+            .db
+            .resolve_or_create_chat_id("web", "tool-use-without-calls-chat", Some("tool"), "web")
+            .unwrap();
+        store_user_message(&state.db, chat_id, "weather?");
+
+        let reply = process_with_agent(
+            &state,
+            AgentRequestContext {
+                caller_channel: "web",
+                chat_id,
+                chat_type: "web",
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reply, "tool_use without calls");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         drop(state);
         let _ = std::fs::remove_dir_all(&base_dir);
