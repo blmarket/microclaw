@@ -24,6 +24,7 @@ use crate::codex_auth::{
     qwen_oauth_file_has_access_token, resolve_openai_codex_auth, resolve_qwen_portal_auth,
 };
 use crate::config::{Config, SandboxBackend, SandboxMode};
+use crate::http_client::llm_user_agent;
 use microclaw_core::error::MicroClawError;
 use microclaw_core::text::floor_char_boundary;
 
@@ -112,6 +113,22 @@ fn telegram_bot_count_key() -> &'static str {
 
 fn telegram_allowed_user_ids_key() -> &'static str {
     "TELEGRAM_ALLOWED_USER_IDS"
+}
+
+fn web_hooks_token_key() -> &'static str {
+    "WEB_HOOKS_TOKEN"
+}
+
+fn web_hooks_default_session_key_key() -> &'static str {
+    "WEB_HOOKS_DEFAULT_SESSION_KEY"
+}
+
+fn web_hooks_allow_request_session_key_key() -> &'static str {
+    "WEB_HOOKS_ALLOW_REQUEST_SESSION_KEY"
+}
+
+fn web_hooks_allowed_session_key_prefixes_key() -> &'static str {
+    "WEB_HOOKS_ALLOWED_SESSION_KEY_PREFIXES"
 }
 
 fn telegram_llm_provider_key() -> &'static str {
@@ -435,6 +452,41 @@ fn parse_i64_list_field(value: &str, field_key: &str) -> Result<Vec<i64>, MicroC
         .filter(|v| !v.is_empty())
         .map(parse_item)
         .collect()
+}
+
+fn parse_string_list_field(value: &str) -> Result<Vec<String>, MicroClawError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if trimmed.starts_with('[') {
+        let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+            MicroClawError::Config(format!("invalid string list JSON array syntax: {e}"))
+        })?;
+        let arr = parsed.as_array().ok_or_else(|| {
+            MicroClawError::Config("string list must be a JSON array when using [] syntax".into())
+        })?;
+        let mut out = Vec::new();
+        for item in arr {
+            let s = item
+                .as_str()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    MicroClawError::Config(
+                        "string list supports only non-empty string values".into(),
+                    )
+                })?;
+            out.push(s.to_string());
+        }
+        return Ok(out);
+    }
+    Ok(trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 fn normalize_soul_path_input(raw: &str, souls_dir: &str) -> String {
@@ -889,6 +941,46 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
+                    key: web_hooks_token_key().into(),
+                    label: "Web hook token (optional, for /hooks/* auth)".into(),
+                    value: existing
+                        .get(web_hooks_token_key())
+                        .cloned()
+                        .unwrap_or_default(),
+                    required: false,
+                    secret: true,
+                },
+                Field {
+                    key: web_hooks_default_session_key_key().into(),
+                    label: "Web hook default session key (optional)".into(),
+                    value: existing
+                        .get(web_hooks_default_session_key_key())
+                        .cloned()
+                        .unwrap_or_default(),
+                    required: false,
+                    secret: false,
+                },
+                Field {
+                    key: web_hooks_allow_request_session_key_key().into(),
+                    label: "Web hook allow request session key (optional true/false)".into(),
+                    value: existing
+                        .get(web_hooks_allow_request_session_key_key())
+                        .cloned()
+                        .unwrap_or_default(),
+                    required: false,
+                    secret: false,
+                },
+                Field {
+                    key: web_hooks_allowed_session_key_prefixes_key().into(),
+                    label: "Web hook allowed session key prefixes (csv, optional)".into(),
+                    value: existing
+                        .get(web_hooks_allowed_session_key_prefixes_key())
+                        .cloned()
+                        .unwrap_or_default(),
+                    required: false,
+                    secret: false,
+                },
+                Field {
                     key: telegram_bot_count_key().into(),
                     label: format!("Telegram bot count (1-{MAX_BOT_SLOTS})"),
                     value: existing
@@ -1043,6 +1135,13 @@ impl SetupApp {
                         .get("LLM_BASE_URL")
                         .cloned()
                         .unwrap_or_else(|| default_base_url.to_string()),
+                    required: false,
+                    secret: false,
+                },
+                Field {
+                    key: "LLM_USER_AGENT".into(),
+                    label: "LLM user-agent (optional)".into(),
+                    value: existing.get("LLM_USER_AGENT").cloned().unwrap_or_default(),
                     required: false,
                     secret: false,
                 },
@@ -1456,6 +1555,59 @@ impl SetupApp {
                         }
                     }
                     map.insert("ENABLED_CHANNELS".into(), enabled.join(","));
+                    if let Some(web_cfg) = config.channels.get("web").and_then(|v| v.as_mapping()) {
+                        if let Some(v) = web_cfg
+                            .get(serde_yaml::Value::String("hooks_token".to_string()))
+                            .or_else(|| {
+                                web_cfg.get(serde_yaml::Value::String("hook_token".to_string()))
+                            })
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                        {
+                            map.insert(web_hooks_token_key().into(), v.to_string());
+                        }
+                        if let Some(v) = web_cfg
+                            .get(serde_yaml::Value::String(
+                                "hooks_default_session_key".to_string(),
+                            ))
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                        {
+                            map.insert(web_hooks_default_session_key_key().into(), v.to_string());
+                        }
+                        if let Some(v) = web_cfg
+                            .get(serde_yaml::Value::String(
+                                "hooks_allow_request_session_key".to_string(),
+                            ))
+                            .and_then(|v| v.as_bool())
+                        {
+                            map.insert(
+                                web_hooks_allow_request_session_key_key().into(),
+                                v.to_string(),
+                            );
+                        }
+                        if let Some(seq) = web_cfg
+                            .get(serde_yaml::Value::String(
+                                "hooks_allowed_session_key_prefixes".to_string(),
+                            ))
+                            .and_then(|v| v.as_sequence())
+                        {
+                            let prefixes = seq
+                                .iter()
+                                .filter_map(|item| item.as_str())
+                                .map(str::trim)
+                                .filter(|v| !v.is_empty())
+                                .collect::<Vec<_>>();
+                            if !prefixes.is_empty() {
+                                map.insert(
+                                    web_hooks_allowed_session_key_prefixes_key().into(),
+                                    prefixes.join(","),
+                                );
+                            }
+                        }
+                    }
                     let telegram_bot_token = if !config.telegram_bot_token.trim().is_empty() {
                         config.telegram_bot_token
                     } else if let Some(ch_cfg) = config.channels.get("telegram") {
@@ -1936,6 +2088,9 @@ impl SetupApp {
                     }
                     if let Some(url) = config.llm_base_url {
                         map.insert("LLM_BASE_URL".into(), url);
+                    }
+                    if config.llm_user_agent != crate::http_client::default_llm_user_agent() {
+                        map.insert("LLM_USER_AGENT".into(), config.llm_user_agent);
                     }
                     map.insert("SHOW_THINKING".into(), config.show_thinking.to_string());
                     map.insert("DATA_DIR".into(), config.data_dir);
@@ -2446,6 +2601,10 @@ impl SetupApp {
 
     fn is_field_visible(&self, key: &str) -> bool {
         match key {
+            "WEB_HOOKS_TOKEN"
+            | "WEB_HOOKS_DEFAULT_SESSION_KEY"
+            | "WEB_HOOKS_ALLOW_REQUEST_SESSION_KEY"
+            | "WEB_HOOKS_ALLOWED_SESSION_KEY_PREFIXES" => self.channel_enabled("web"),
             "TELEGRAM_MODEL" | "TELEGRAM_ALLOWED_USER_IDS" => self.channel_enabled("telegram"),
             "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "TELEGRAM_ACCOUNT_ID" => false,
             "TELEGRAM_LLM_PROVIDER" | "TELEGRAM_LLM_API_KEY" | "TELEGRAM_LLM_BASE_URL" => false,
@@ -2714,6 +2873,25 @@ impl SetupApp {
                 return Err(MicroClawError::Config(format!("{} is required", field.key)));
             }
         }
+
+        let hooks_allow_raw = self.field_value(web_hooks_allow_request_session_key_key());
+        if !hooks_allow_raw.trim().is_empty() {
+            let _ = parse_boolish(&hooks_allow_raw, false).map_err(|_| {
+                MicroClawError::Config(format!(
+                    "{} must be true/false",
+                    web_hooks_allow_request_session_key_key()
+                ))
+            })?;
+        }
+        let _ = parse_string_list_field(
+            &self.field_value(web_hooks_allowed_session_key_prefixes_key()),
+        )
+        .map_err(|_| {
+            MicroClawError::Config(format!(
+                "{} must be csv or JSON string array",
+                web_hooks_allowed_session_key_prefixes_key()
+            ))
+        })?;
 
         if self.channel_enabled("telegram") {
             let _ = parse_bot_count(
@@ -3060,6 +3238,7 @@ impl SetupApp {
             (self.field_value("LLM_API_KEY"), None)
         };
         let base_url = self.field_value("LLM_BASE_URL");
+        let user_agent = self.field_value("LLM_USER_AGENT");
         let model = self.field_value("LLM_MODEL");
         std::thread::spawn(move || {
             perform_online_validation(
@@ -3069,6 +3248,7 @@ impl SetupApp {
                 &provider,
                 &api_key,
                 &base_url,
+                &user_agent,
                 &model,
                 codex_account_id.as_deref(),
             )
@@ -3457,6 +3637,8 @@ impl SetupApp {
             "TELEGRAM_ACCOUNT_ID" | "DISCORD_ACCOUNT_ID" => default_account_id().to_string(),
             "TELEGRAM_BOT_TOKEN"
             | "BOT_USERNAME"
+            | "WEB_HOOKS_TOKEN"
+            | "WEB_HOOKS_ALLOWED_SESSION_KEY_PREFIXES"
             | "TELEGRAM_MODEL"
             | "TELEGRAM_ALLOWED_USER_IDS"
             | "TELEGRAM_LLM_PROVIDER"
@@ -3466,6 +3648,8 @@ impl SetupApp {
             | "DISCORD_MODEL"
             | "DISCORD_ACCOUNTS_JSON"
             | "LLM_API_KEY" => String::new(),
+            "WEB_HOOKS_DEFAULT_SESSION_KEY" => "hook:ingress".into(),
+            "WEB_HOOKS_ALLOW_REQUEST_SESSION_KEY" => "false".into(),
             _ if key == telegram_bot_count_key() => TELEGRAM_DEFAULT_BOT_COUNT.to_string(),
             _ if key.starts_with("TELEGRAM_BOT") => {
                 if key.ends_with("_ENABLED") {
@@ -3479,6 +3663,7 @@ impl SetupApp {
             "LLM_BASE_URL" => find_provider_preset(&provider)
                 .map(|p| p.default_base_url.to_string())
                 .unwrap_or_default(),
+            "LLM_USER_AGENT" => String::new(),
             "SHOW_THINKING" => "false".into(),
             "DATA_DIR" => default_data_dir_for_setup(),
             "OVERRIDE_TIMEZONE" => String::new(),
@@ -3552,11 +3737,15 @@ impl SetupApp {
             "DATA_DIR" | "OVERRIDE_TIMEZONE" | "WORKING_DIR" | "SOULS_DIR" => "App",
             "SANDBOX_ENABLED" | "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED" => "Sandbox",
             "REFLECTOR_ENABLED" | "REFLECTOR_INTERVAL_MINS" | "MEMORY_TOKEN_BUDGET" => "Memory",
-            "LLM_PROVIDER" | "LLM_API_KEY" | "LLM_MODEL" | "LLM_BASE_URL"
+            "LLM_PROVIDER" | "LLM_API_KEY" | "LLM_MODEL" | "LLM_BASE_URL" | "LLM_USER_AGENT"
             | "SHOW_THINKING" => "Model",
             "EMBEDDING_PROVIDER" | "EMBEDDING_API_KEY" | "EMBEDDING_BASE_URL"
             | "EMBEDDING_MODEL" | "EMBEDDING_DIM" => "Embedding",
             "ENABLED_CHANNELS"
+            | "WEB_HOOKS_TOKEN"
+            | "WEB_HOOKS_DEFAULT_SESSION_KEY"
+            | "WEB_HOOKS_ALLOW_REQUEST_SESSION_KEY"
+            | "WEB_HOOKS_ALLOWED_SESSION_KEY_PREFIXES"
             | "TELEGRAM_BOT_TOKEN"
             | "BOT_USERNAME"
             | "TELEGRAM_ACCOUNT_ID"
@@ -3575,6 +3764,138 @@ impl SetupApp {
             _ if key == telegram_bot_count_key() => "Channel",
             _ if key.starts_with("TELEGRAM_BOT") => "Channel",
             _ => "Setup",
+        }
+    }
+
+    fn field_guidance(key: &str) -> (&'static str, &'static str) {
+        match key {
+            "LLM_PROVIDER" => (
+                "Select the LLM backend. Presets auto-fill a sensible model/base URL.",
+                "Example: openai, anthropic, deepseek, custom",
+            ),
+            "LLM_API_KEY" => (
+                "API key for the selected provider. Leave empty only for providers that allow it.",
+                "Example: sk-xxxx",
+            ),
+            "LLM_MODEL" => (
+                "Default model used when no per-channel override is set.",
+                "Example: qwen3.5-plus",
+            ),
+            "LLM_BASE_URL" => (
+                "Custom OpenAI-compatible endpoint root. Use provider default if empty.",
+                "Example: https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            "LLM_USER_AGENT" => (
+                "HTTP User-Agent for LLM requests. Empty means automatic MicroClaw/<version>.",
+                "Example: OpenClaw-Gateway/1.0",
+            ),
+            "SHOW_THINKING" => (
+                "Show model reasoning/thinking text in channel output when provider supports it.",
+                "Example: true or false",
+            ),
+            "ENABLED_CHANNELS" => (
+                "Comma-separated channel names to enable now. You can configure more later.",
+                "Example: web,feishu,telegram",
+            ),
+            "WEB_HOOKS_TOKEN" => (
+                "Bearer token used to authenticate /hooks/* and /api/hooks/* requests.",
+                "Example: my-hooks-secret",
+            ),
+            "WEB_HOOKS_DEFAULT_SESSION_KEY" => (
+                "Default session key used by hooks when request payload omits sessionKey.",
+                "Example: hook:ingress",
+            ),
+            "WEB_HOOKS_ALLOW_REQUEST_SESSION_KEY" => (
+                "Whether hook payload may override sessionKey. Keep false unless you trust callers.",
+                "Example: true or false",
+            ),
+            "WEB_HOOKS_ALLOWED_SESSION_KEY_PREFIXES" => (
+                "Allowlist of sessionKey prefixes when request override is enabled (csv/JSON array).",
+                "Example: hook:,chat:",
+            ),
+            "DATA_DIR" => (
+                "Root directory for runtime data (DB, sessions, memory, skills).",
+                "Example: ./microclaw.data",
+            ),
+            "WORKING_DIR" => (
+                "Filesystem base path for tools like read/write/bash/glob.",
+                "Example: ./tmp",
+            ),
+            "OVERRIDE_TIMEZONE" => (
+                "Optional IANA timezone override for scheduling. Empty uses system timezone.",
+                "Example: Asia/Shanghai",
+            ),
+            "SOULS_DIR" => (
+                "Directory storing SOUL.md personalities. Empty uses <data_dir>/souls.",
+                "Example: ./microclaw.data/souls",
+            ),
+            "REFLECTOR_ENABLED" => (
+                "Enable periodic memory reflection that extracts structured memories from chat.",
+                "Example: true or false",
+            ),
+            "REFLECTOR_INTERVAL_MINS" => ("How often memory reflection runs.", "Example: 15"),
+            "MEMORY_TOKEN_BUDGET" => (
+                "Approximate token budget for injected memories in the system prompt.",
+                "Example: 1500",
+            ),
+            "EMBEDDING_PROVIDER" => (
+                "Provider for memory embeddings (semantic retrieval). Optional feature.",
+                "Example: openai or ollama",
+            ),
+            "EMBEDDING_API_KEY" => (
+                "API key for embedding provider, if required.",
+                "Example: sk-xxxx",
+            ),
+            "EMBEDDING_BASE_URL" => (
+                "Custom endpoint for embedding provider.",
+                "Example: https://api.openai.com/v1",
+            ),
+            "EMBEDDING_MODEL" => (
+                "Embedding model name for memory vectors.",
+                "Example: text-embedding-3-small",
+            ),
+            "EMBEDDING_DIM" => ("Embedding vector dimension.", "Example: 1536"),
+            "SANDBOX_ENABLED" => (
+                "Enable sandbox mode for tool execution isolation.",
+                "Example: true or false",
+            ),
+            "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED" => (
+                "Require explicit confirmation before running high-risk tools.",
+                "Example: true or false",
+            ),
+            _ if key.ends_with("_BOT_TOKEN") => (
+                "Bot token for this channel account.",
+                "Example: 123456:ABCDEF...",
+            ),
+            _ if key.ends_with("_MODEL") => (
+                "Per-channel/per-account model override.",
+                "Example: qwen3.5-plus",
+            ),
+            _ if key.ends_with("_LLM_PROVIDER") => (
+                "Per-channel/per-account LLM provider override.",
+                "Example: openai",
+            ),
+            _ if key.ends_with("_LLM_API_KEY") => (
+                "Per-channel/per-account API key override.",
+                "Example: sk-xxxx",
+            ),
+            _ if key.ends_with("_LLM_BASE_URL") => (
+                "Per-channel/per-account base URL override.",
+                "Example: https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            _ if key.ends_with("_ALLOWED_USER_IDS") => (
+                "Allowed user IDs for this bot/account.",
+                "Example: 12345,67890",
+            ),
+            _ if key.ends_with("_SOUL_PATH") => (
+                "SOUL.md filename/path used by this bot/account.",
+                "Example: souls/soul-zhang.md",
+            ),
+            _ if key.starts_with("DYN_") => (
+                "Dynamic channel field loaded from channel setup definition.",
+                "Example: fill with your channel-specific credential/config value",
+            ),
+            _ => ("Configuration value used by setup/runtime.", ""),
         }
     }
 
@@ -3638,18 +3959,23 @@ impl SetupApp {
             "LLM_API_KEY" => ORDER_MODEL_BASE + 1,
             "LLM_MODEL" => ORDER_MODEL_BASE + 2,
             "LLM_BASE_URL" => ORDER_MODEL_BASE + 3,
-            "SHOW_THINKING" => ORDER_MODEL_BASE + 4,
+            "LLM_USER_AGENT" => ORDER_MODEL_BASE + 4,
+            "SHOW_THINKING" => ORDER_MODEL_BASE + 5,
             // 2) Channel (dynamic channel fields are placed in the branch above)
             "ENABLED_CHANNELS" => ORDER_CHANNEL_BASE,
-            "TELEGRAM_BOT_TOKEN" => ORDER_CHANNEL_BASE + 1,
-            "BOT_USERNAME" => ORDER_CHANNEL_BASE + 2,
-            "TELEGRAM_ACCOUNT_ID" => ORDER_CHANNEL_BASE + 3,
-            _ if key == telegram_bot_count_key() => ORDER_CHANNEL_BASE + 5,
-            "TELEGRAM_MODEL" => ORDER_CHANNEL_BASE + 6,
-            "TELEGRAM_ALLOWED_USER_IDS" => ORDER_CHANNEL_BASE + 7,
-            "TELEGRAM_LLM_PROVIDER" => ORDER_CHANNEL_BASE + 8,
-            "TELEGRAM_LLM_API_KEY" => ORDER_CHANNEL_BASE + 9,
-            "TELEGRAM_LLM_BASE_URL" => ORDER_CHANNEL_BASE + 10,
+            "WEB_HOOKS_TOKEN" => ORDER_CHANNEL_BASE + 1,
+            "WEB_HOOKS_DEFAULT_SESSION_KEY" => ORDER_CHANNEL_BASE + 2,
+            "WEB_HOOKS_ALLOW_REQUEST_SESSION_KEY" => ORDER_CHANNEL_BASE + 3,
+            "WEB_HOOKS_ALLOWED_SESSION_KEY_PREFIXES" => ORDER_CHANNEL_BASE + 4,
+            "TELEGRAM_BOT_TOKEN" => ORDER_CHANNEL_BASE + 10,
+            "BOT_USERNAME" => ORDER_CHANNEL_BASE + 11,
+            "TELEGRAM_ACCOUNT_ID" => ORDER_CHANNEL_BASE + 12,
+            _ if key == telegram_bot_count_key() => ORDER_CHANNEL_BASE + 13,
+            "TELEGRAM_MODEL" => ORDER_CHANNEL_BASE + 14,
+            "TELEGRAM_ALLOWED_USER_IDS" => ORDER_CHANNEL_BASE + 15,
+            "TELEGRAM_LLM_PROVIDER" => ORDER_CHANNEL_BASE + 16,
+            "TELEGRAM_LLM_API_KEY" => ORDER_CHANNEL_BASE + 17,
+            "TELEGRAM_LLM_BASE_URL" => ORDER_CHANNEL_BASE + 18,
             "DISCORD_BOT_TOKEN" => ORDER_CHANNEL_BASE + 900,
             "DISCORD_ACCOUNT_ID" => ORDER_CHANNEL_BASE + 901,
             "DISCORD_MODEL" => ORDER_CHANNEL_BASE + 902,
@@ -3733,6 +4059,7 @@ fn perform_online_validation(
     provider: &str,
     api_key: &str,
     base_url: &str,
+    configured_user_agent: &str,
     model: &str,
     codex_account_id: Option<&str>,
 ) -> Result<Vec<String>, MicroClawError> {
@@ -3740,6 +4067,7 @@ fn perform_online_validation(
     let mut checks = Vec::new();
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
+        .user_agent(llm_user_agent(configured_user_agent))
         .build()?;
 
     // --- Telegram validation (optional) ---
@@ -4101,6 +4429,13 @@ fn save_config_yaml(
         channels.clone()
     };
     let channel_selected = |name: &str| selected_channels.iter().any(|c| c == name);
+    let web_hooks_token = get(web_hooks_token_key());
+    let web_hooks_default_session_key = get(web_hooks_default_session_key_key());
+    let web_hooks_allow_request_session_key_raw = get(web_hooks_allow_request_session_key_key());
+    let web_hooks_allow_request_session_key =
+        parse_boolish(&web_hooks_allow_request_session_key_raw, false)?;
+    let web_hooks_allowed_session_key_prefixes =
+        parse_string_list_field(&get(web_hooks_allowed_session_key_prefixes_key()))?;
     let telegram_token = if !get("TELEGRAM_BOT_TOKEN").trim().is_empty() {
         get("TELEGRAM_BOT_TOKEN")
     } else {
@@ -4293,6 +4628,30 @@ fn save_config_yaml(
 
     yaml.push_str("  web:\n");
     yaml.push_str(&format!("    enabled: {}\n", channel_selected("web")));
+    if !web_hooks_token.trim().is_empty() {
+        yaml.push_str(&format!(
+            "    hooks_token: {}\n",
+            yaml_double_quoted(web_hooks_token.trim())
+        ));
+    }
+    if !web_hooks_default_session_key.trim().is_empty() {
+        yaml.push_str(&format!(
+            "    hooks_default_session_key: {}\n",
+            yaml_double_quoted(web_hooks_default_session_key.trim())
+        ));
+    }
+    if !web_hooks_allow_request_session_key_raw.trim().is_empty() {
+        yaml.push_str(&format!(
+            "    hooks_allow_request_session_key: {}\n",
+            web_hooks_allow_request_session_key
+        ));
+    }
+    if !web_hooks_allowed_session_key_prefixes.is_empty() {
+        yaml.push_str("    hooks_allowed_session_key_prefixes:\n");
+        for prefix in &web_hooks_allowed_session_key_prefixes {
+            yaml.push_str(&format!("      - {}\n", yaml_double_quoted(prefix)));
+        }
+    }
 
     if channel_selected("telegram") || telegram_present {
         yaml.push_str("  telegram:\n");
@@ -4546,6 +4905,11 @@ fn save_config_yaml(
     if !base_url.is_empty() {
         yaml.push_str("# Custom base URL (optional)\n");
         yaml.push_str(&format!("llm_base_url: \"{}\"\n", base_url));
+    }
+    let llm_user_agent = get("LLM_USER_AGENT");
+    if !llm_user_agent.is_empty() {
+        yaml.push_str("# LLM HTTP User-Agent (optional)\n");
+        yaml.push_str(&format!("llm_user_agent: \"{}\"\n", llm_user_agent));
     }
     let show_thinking = values
         .get("SHOW_THINKING")
@@ -4851,23 +5215,53 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
     frame.render_widget(body, left_inner);
 
     let field = app.selected_field();
-    let help = Paragraph::new(vec![
+    let (field_desc, field_example_raw) = SetupApp::field_guidance(&field.key);
+    let field_example = field_example_raw
+        .strip_prefix("Example: ")
+        .unwrap_or(field_example_raw);
+    let is_required = app.is_field_required(field);
+    let mut help_lines = vec![
         Line::from(vec![
             Span::styled("Key: ", Style::default().fg(Color::DarkGray)),
             Span::styled(field.key.clone(), Style::default().fg(Color::Magenta)),
         ]),
         Line::from(vec![
             Span::styled("Required: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(if app.is_field_required(field) {
-                "yes"
-            } else {
-                "no"
-            }),
+            Span::raw(if is_required { "yes" } else { "no" }),
         ]),
         Line::from(vec![
             Span::styled("Editing: ", Style::default().fg(Color::DarkGray)),
             Span::raw(if app.editing { "active" } else { "idle" }),
         ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("What: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(field_desc),
+        ]),
+    ];
+    if !field_example.is_empty() {
+        help_lines.push(Line::from(vec![
+            Span::styled("Example: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(field_example, Style::default().fg(Color::LightGreen)),
+        ]));
+    }
+    if !is_required {
+        let default_value = if field.key == "LLM_USER_AGENT" {
+            crate::http_client::default_llm_user_agent()
+        } else {
+            app.default_value_for_field(&field.key)
+        };
+        let default_display = if default_value.trim().is_empty() {
+            "(empty)".to_string()
+        } else {
+            default_value
+        };
+        help_lines.push(Line::from(vec![
+            Span::styled("Default value: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(default_display, Style::default().fg(Color::LightBlue)),
+        ]));
+    }
+    help_lines.extend([
         Line::from(""),
         Line::from(Span::styled(
             "Tips",
@@ -4890,13 +5284,14 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
         Line::from("• F2: validate + online checks"),
         Line::from("• s: save with online validation"),
         Line::from("• Ctrl+S / Ctrl+Shift+S: save without online model validation"),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Details / Help"),
-    )
-    .wrap(Wrap { trim: false });
+    ]);
+    let help = Paragraph::new(help_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Details / Help"),
+        )
+        .wrap(Wrap { trim: false });
     frame.render_widget(help, body_chunks[1].inner(Margin::new(1, 0)));
 
     let (status_icon, status_color) =
@@ -5531,6 +5926,54 @@ mod tests {
     }
 
     #[test]
+    fn test_setup_loads_existing_web_hook_settings() {
+        let _guard = env_lock();
+        let temp = std::env::temp_dir().join(format!(
+            "microclaw_setup_load_web_hooks_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp).unwrap();
+        std::fs::write(
+            temp.join("microclaw.config.yaml"),
+            r#"
+bot_username: bot
+api_key: key
+channels:
+  web:
+    enabled: true
+    hooks_token: "my-hooks-secret"
+    hooks_default_session_key: "hook:ingress"
+    hooks_allow_request_session_key: false
+    hooks_allowed_session_key_prefixes:
+      - "hook:"
+      - "ops:"
+"#,
+        )
+        .unwrap();
+
+        let app = SetupApp::new();
+        assert_eq!(app.field_value(web_hooks_token_key()), "my-hooks-secret");
+        assert_eq!(
+            app.field_value(web_hooks_default_session_key_key()),
+            "hook:ingress"
+        );
+        assert_eq!(
+            app.field_value(web_hooks_allow_request_session_key_key()),
+            "false"
+        );
+        assert_eq!(
+            app.field_value(web_hooks_allowed_session_key_prefixes_key()),
+            "hook:,ops:"
+        );
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        let _ = std::fs::remove_file(temp.join("microclaw.config.yaml"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn test_save_config_yaml() {
         let yaml_path = std::env::temp_dir().join(format!(
             "microclaw_setup_test_{}.yaml",
@@ -5656,6 +6099,44 @@ mod tests {
         let cfg: crate::config::Config = serde_yaml::from_str(&s).unwrap();
         assert_eq!(cfg.data_dir, "/home/alice/.microclaw");
         assert_eq!(cfg.working_dir, "/home/alice/.microclaw/working_dir");
+
+        let _ = fs::remove_file(&yaml_path);
+    }
+
+    #[test]
+    fn test_save_config_yaml_writes_web_hook_settings() {
+        let yaml_path = std::env::temp_dir().join(format!(
+            "microclaw_setup_web_hooks_test_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+
+        let mut values = HashMap::new();
+        values.insert("ENABLED_CHANNELS".into(), "web".into());
+        values.insert("LLM_PROVIDER".into(), "anthropic".into());
+        values.insert("LLM_API_KEY".into(), "key".into());
+        values.insert(web_hooks_token_key().into(), "my-hooks-secret".into());
+        values.insert(
+            web_hooks_default_session_key_key().into(),
+            "hook:ingress".into(),
+        );
+        values.insert(
+            web_hooks_allow_request_session_key_key().into(),
+            "false".into(),
+        );
+        values.insert(
+            web_hooks_allowed_session_key_prefixes_key().into(),
+            "hook:,ops:".into(),
+        );
+
+        save_config_yaml(&yaml_path, &values).unwrap();
+        let s = fs::read_to_string(&yaml_path).unwrap();
+        assert!(s.contains("  web:\n"));
+        assert!(s.contains("    hooks_token: \"my-hooks-secret\"\n"));
+        assert!(s.contains("    hooks_default_session_key: \"hook:ingress\"\n"));
+        assert!(s.contains("    hooks_allow_request_session_key: false\n"));
+        assert!(s.contains("    hooks_allowed_session_key_prefixes:\n"));
+        assert!(s.contains("      - \"hook:\"\n"));
+        assert!(s.contains("      - \"ops:\"\n"));
 
         let _ = fs::remove_file(&yaml_path);
     }

@@ -32,6 +32,9 @@ const LONG_ABOUT: &str = concat!(
     about = LONG_ABOUT
 )]
 struct Cli {
+    /// Explicit config file path (absolute or relative)
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<MainCommand>,
 }
@@ -381,6 +384,27 @@ fn collect_mcp_config_paths(data_root: &Path) -> Vec<PathBuf> {
     paths
 }
 
+fn apply_config_override(path: Option<&PathBuf>) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("--config path cannot be empty");
+    }
+    let resolved = if path.is_absolute() {
+        path.clone()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("failed to resolve current directory: {e}"))?
+            .join(path)
+    };
+    if !resolved.exists() {
+        anyhow::bail!("--config points to non-existent file: {}", resolved.display());
+    }
+    std::env::set_var("MICROCLAW_CONFIG", &resolved);
+    Ok(())
+}
+
 async fn reembed_memories() -> anyhow::Result<()> {
     let config = Config::load()?;
 
@@ -451,6 +475,7 @@ async fn reembed_memories() -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    apply_config_override(cli.config.as_ref())?;
 
     match cli.command {
         Some(MainCommand::Start) => {}
@@ -589,10 +614,10 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{migrate_legacy_runtime_layout, Cli, MainCommand};
+    use super::{apply_config_override, migrate_legacy_runtime_layout, Cli, MainCommand};
     use clap::Parser;
     use microclaw::config::Config;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     fn unique_temp_dir() -> std::path::PathBuf {
         let dir =
@@ -615,6 +640,41 @@ mod tests {
         assert!(!runtime_dir.exists());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cli_parses_global_config_option_for_start() {
+        let cli = Cli::parse_from(["microclaw", "--config", "api_test_microclaw.config.yaml", "start"]);
+        let config = cli
+            .config
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        assert_eq!(config, "api_test_microclaw.config.yaml");
+        assert!(matches!(cli.command, Some(MainCommand::Start)));
+    }
+
+    #[test]
+    fn apply_config_override_accepts_relative_path() {
+        let base = unique_temp_dir();
+        let cfg = base.join("api_test_microclaw.config.yaml");
+        std::fs::write(&cfg, "web_enabled: true\n").expect("write config");
+
+        let old_cwd = std::env::current_dir().expect("current_dir");
+        let old_cfg = std::env::var("MICROCLAW_CONFIG").ok();
+        std::env::set_current_dir(&base).expect("set_current_dir");
+        let rel = PathBuf::from("api_test_microclaw.config.yaml");
+        apply_config_override(Some(&rel)).expect("apply config override");
+        let resolved = std::env::var("MICROCLAW_CONFIG").expect("MICROCLAW_CONFIG");
+        assert!(resolved.ends_with("api_test_microclaw.config.yaml"));
+
+        if let Some(v) = old_cfg {
+            std::env::set_var("MICROCLAW_CONFIG", v);
+        } else {
+            std::env::remove_var("MICROCLAW_CONFIG");
+        }
+        std::env::set_current_dir(old_cwd).expect("restore cwd");
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

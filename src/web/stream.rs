@@ -8,6 +8,24 @@ pub(super) async fn api_send_stream(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     metrics_http_inc(&state).await;
     let identity = require_scope(&state, &headers, AuthScope::Write).await?;
+    start_stream_run_internal(state, body, identity.actor, "/api/send_stream").await
+}
+
+pub(super) async fn start_stream_run_with_actor(
+    state: WebState,
+    body: SendRequest,
+    actor: String,
+    endpoint: &'static str,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    start_stream_run_internal(state, body, actor, endpoint).await
+}
+
+async fn start_stream_run_internal(
+    state: WebState,
+    body: SendRequest,
+    actor: String,
+    endpoint: &'static str,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let start = Instant::now();
 
     let text = body.message.trim().to_string();
@@ -19,12 +37,12 @@ pub(super) async fn api_send_stream(
     let session_key = normalize_session_key(body.session_key.as_deref());
     if let Err((status, msg)) = state
         .request_hub
-        .begin(&session_key, &identity.actor, &state.limits)
+        .begin(&session_key, &actor, &state.limits)
         .await
     {
         info!(
             target: "web",
-            endpoint = "/api/send_stream",
+            endpoint = endpoint,
             session_key = %session_key,
             status = status.as_u16(),
             reason = %msg,
@@ -35,7 +53,7 @@ pub(super) async fn api_send_stream(
     }
 
     let run_id = uuid::Uuid::new_v4().to_string();
-    state.run_hub.create(&run_id, identity.actor.clone()).await;
+    state.run_hub.create(&run_id, actor.clone()).await;
     let state_for_task = state.clone();
     let run_id_for_task = run_id.clone();
     let lock = state
@@ -46,7 +64,7 @@ pub(super) async fn api_send_stream(
     let session_key_for_release = session_key.clone();
     info!(
         target: "web",
-        endpoint = "/api/send_stream",
+        endpoint = endpoint,
         session_key = %session_key,
         run_id = %run_id,
         latency_ms = start.elapsed().as_millis(),
@@ -231,7 +249,7 @@ pub(super) async fn api_send_stream(
                 .await;
             tracing::error!(
                 target: "web",
-                endpoint = "/api/send_stream",
+                endpoint = endpoint,
                 session_key = %session_key_for_release,
                 run_id = %run_id_for_task,
                 "stream task panicked"
@@ -240,11 +258,11 @@ pub(super) async fn api_send_stream(
 
         state_for_task
             .request_hub
-            .end_with_limits(&session_key_for_release, &identity.actor, &limits)
+            .end_with_limits(&session_key_for_release, &actor, &limits)
             .await;
         info!(
             target: "web",
-            endpoint = "/api/send_stream",
+            endpoint = endpoint,
             session_key = %session_key_for_release,
             run_id = %run_id_for_task,
             panicked = panicked,

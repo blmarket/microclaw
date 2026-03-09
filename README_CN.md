@@ -415,6 +415,79 @@ Todo 列表存储在 `<data_dir>/runtime/groups/{chat_id}/TODO.json`，跨会话
 - 如果当前没有会话，Web UI 会自动生成一个 `session-YYYYMMDDHHmmss` 格式的会话键
 - 在该会话发送第一条消息后，会自动持久化到 SQLite
 
+### HTTP 请求触发（自动化 / 无头调用）
+
+如果要让外部系统（Webhook、CI、脚本）主动触发 agent，可使用 Web API，并配置带
+`operator.write` scope 的 API key。
+
+详细说明见：[`docs/operations/http-hook-trigger.md`](docs/operations/http-hook-trigger.md)
+
+可用端点：
+- `POST /api/send`（主端点）
+- `POST /api/chat`（聊天客户端风格别名）
+- `POST /api/send_stream`（异步运行 + SSE 回放）
+- `POST /api/chat_stream`（聊天客户端风格别名）
+- `POST /hooks/agent` 与 `POST /api/hooks/agent`（兼容 OpenClaw webhook 请求体）
+- `POST /hooks/wake` 与 `POST /api/hooks/wake`（系统事件唤醒，支持 `now` 或 `next-heartbeat`）
+
+Hook 鉴权与策略（`channels.web`）：
+```yaml
+channels:
+  web:
+    hooks_token: "replace-with-secret"
+    hooks_default_session_key: "hook:ingress"
+    hooks_allow_request_session_key: false
+    hooks_allowed_session_key_prefixes: ["hook:"]
+```
+
+说明：
+- `/hooks/*` 需要独立 hook token（`Authorization: Bearer <token>` 或 `x-openclaw-token`）。
+- 请求体里的 `sessionKey` 默认拒绝；只有 `hooks_allow_request_session_key: true` 才允许。
+- 若允许外部传 `sessionKey`，建议同时配置前缀白名单，避免任意会话路由。
+
+请求体：
+```json
+{
+  "session_key": "ops-bot",
+  "sender_name": "automation",
+  "message": "检查最近 1 小时错误预算并汇总事故。"
+}
+```
+
+同步返回（`/api/send` 或 `/api/chat`）：
+```json
+{
+  "ok": true,
+  "session_key": "ops-bot",
+  "chat_id": 123,
+  "response": "..."
+}
+```
+
+调用示例：
+```sh
+curl -sS http://127.0.0.1:10961/api/chat \
+  -H "Authorization: Bearer $MICROCLAW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session_key":"ops-bot","sender_name":"automation","message":"请给出状态摘要"}'
+```
+
+OpenClaw 风格 webhook 请求体示例：
+```sh
+curl -sS http://127.0.0.1:10961/hooks/agent \
+  -H "Authorization: Bearer $MICROCLAW_HOOKS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Summarize inbox","name":"Email","sessionKey":"hook:email:msg-123"}'
+```
+
+Wake 示例：
+```sh
+curl -sS http://127.0.0.1:10961/hooks/wake \
+  -H "Authorization: Bearer $MICROCLAW_HOOKS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"New email received","mode":"now"}'
+```
+
 ## 发布
 
 一条命令同时发布安装脚本模式（GitHub Release 资产）和 Homebrew 模式：
@@ -422,6 +495,9 @@ Todo 列表存储在 `<data_dir>/runtime/groups/{chat_id}/TODO.json`，跨会话
 ```sh
 ./deploy.sh
 ```
+
+Nixpkgs 上游/更新流程参考：
+- `docs/releases/nixpkgs-upstream-guide.md`
 
 ## 配置
 

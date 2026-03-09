@@ -16,6 +16,7 @@ Modes:
 Notes:
   - This script delegates to scripts/release_homebrew.sh.
   - Configure TAP_DIR if your local tap checkout is not in the default path.
+  - Set AUTO_NIXPKGS_UPDATE=1 to run scripts/update-nixpkgs.sh after release.
 EOF
 }
 
@@ -46,6 +47,14 @@ cargo clippy --all-targets -- -D warnings
 echo "Starting deploy ($MODE)..."
 "$ROOT_DIR/scripts/release_homebrew.sh"
 
+if [ "${AUTO_NIXPKGS_UPDATE:-0}" = "1" ]; then
+  if [ ! -x "$ROOT_DIR/scripts/update-nixpkgs.sh" ]; then
+    echo "Missing executable: scripts/update-nixpkgs.sh" >&2
+    exit 1
+  fi
+  echo "Running nixpkgs auto update..."
+  "$ROOT_DIR/scripts/update-nixpkgs.sh"
+fi
 
 
 echo "Deploy complete."

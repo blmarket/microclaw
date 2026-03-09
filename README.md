@@ -534,6 +534,79 @@ When `web_enabled: true`, MicroClaw serves a local Web UI (default `http://127.0
   - `microclaw web password-generate`
   - `microclaw web password-clear`
 
+### HTTP Request Trigger (headless automation)
+
+For external automation (webhooks, CI, scripts), use the Web API with an API key that has
+`operator.write` scope.
+
+Detailed guide: [`docs/operations/http-hook-trigger.md`](docs/operations/http-hook-trigger.md)
+
+Endpoints:
+- `POST /api/send` (canonical)
+- `POST /api/chat` (alias for chatbot-style clients)
+- `POST /api/send_stream` (async run + SSE replay)
+- `POST /api/chat_stream` (alias for chatbot-style clients)
+- `POST /hooks/agent` and `POST /api/hooks/agent` (OpenClaw-style webhook payload compatibility)
+- `POST /hooks/wake` and `POST /api/hooks/wake` (system-event wake trigger: `now` or `next-heartbeat`)
+
+Hook auth + policy (`channels.web`):
+```yaml
+channels:
+  web:
+    hooks_token: "replace-with-secret"
+    hooks_default_session_key: "hook:ingress"
+    hooks_allow_request_session_key: false
+    hooks_allowed_session_key_prefixes: ["hook:"]
+```
+
+Notes:
+- `/hooks/*` requires hook token (`Authorization: Bearer <token>` or `x-openclaw-token`).
+- `sessionKey` in request body is rejected by default unless `hooks_allow_request_session_key: true`.
+- If you enable request `sessionKey`, use prefix allowlist to avoid arbitrary session routing.
+
+Request body:
+```json
+{
+  "session_key": "ops-bot",
+  "sender_name": "automation",
+  "message": "Check error budget and summarize incidents in the last hour."
+}
+```
+
+Synchronous response (`/api/send` or `/api/chat`):
+```json
+{
+  "ok": true,
+  "session_key": "ops-bot",
+  "chat_id": 123,
+  "response": "..."
+}
+```
+
+Example:
+```sh
+curl -sS http://127.0.0.1:10961/api/chat \
+  -H "Authorization: Bearer $MICROCLAW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session_key":"ops-bot","sender_name":"automation","message":"status summary"}'
+```
+
+OpenClaw-compatible webhook shape:
+```sh
+curl -sS http://127.0.0.1:10961/hooks/agent \
+  -H "Authorization: Bearer $MICROCLAW_HOOKS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Summarize inbox","name":"Email","sessionKey":"hook:email:msg-123"}'
+```
+
+Wake example:
+```sh
+curl -sS http://127.0.0.1:10961/hooks/wake \
+  -H "Authorization: Bearer $MICROCLAW_HOOKS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"New email received","mode":"now"}'
+```
+
 ## Release
 
 Publish both installer mode (GitHub Release asset used by `install.sh`) and Homebrew mode with one command:
@@ -541,6 +614,9 @@ Publish both installer mode (GitHub Release asset used by `install.sh`) and Home
 ```sh
 ./deploy.sh
 ```
+
+Nixpkgs upstream/update playbook:
+- `docs/releases/nixpkgs-upstream-guide.md`
 
 ## Setup
 
