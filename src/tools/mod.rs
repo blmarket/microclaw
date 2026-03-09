@@ -56,6 +56,10 @@ impl ToolRegistry {
                 | "subagents_list"
                 | "subagents_info"
                 | "subagents_kill"
+                | "subagents_focus"
+                | "subagents_unfocus"
+                | "subagents_focused"
+                | "subagents_send"
         )
     }
 

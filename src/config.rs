@@ -156,6 +156,12 @@ fn default_subagent_max_spawn_depth() -> usize {
 fn default_subagent_max_children_per_run() -> usize {
     5
 }
+fn default_subagent_thread_bound_routing_enabled() -> bool {
+    true
+}
+fn default_subagent_announce_relay_interval_secs() -> u64 {
+    15
+}
 
 fn default_model_prices() -> Vec<ModelPrice> {
     Vec::new()
@@ -253,6 +259,10 @@ pub struct SubagentConfig {
     pub max_spawn_depth: usize,
     #[serde(default = "default_subagent_max_children_per_run")]
     pub max_children_per_run: usize,
+    #[serde(default = "default_subagent_thread_bound_routing_enabled")]
+    pub thread_bound_routing_enabled: bool,
+    #[serde(default = "default_subagent_announce_relay_interval_secs")]
+    pub announce_relay_interval_secs: u64,
 }
 
 impl Default for SubagentConfig {
@@ -264,6 +274,8 @@ impl Default for SubagentConfig {
             announce_to_chat: default_subagent_announce(),
             max_spawn_depth: default_subagent_max_spawn_depth(),
             max_children_per_run: default_subagent_max_children_per_run(),
+            thread_bound_routing_enabled: default_subagent_thread_bound_routing_enabled(),
+            announce_relay_interval_secs: default_subagent_announce_relay_interval_secs(),
         }
     }
 }
@@ -1055,6 +1067,12 @@ Use operator password + API keys for Web auth."
         if self.subagents.max_children_per_run == 0 {
             self.subagents.max_children_per_run = default_subagent_max_children_per_run();
         }
+        if self.subagents.announce_relay_interval_secs == 0 {
+            self.subagents.announce_relay_interval_secs =
+                default_subagent_announce_relay_interval_secs();
+        }
+        self.subagents.announce_relay_interval_secs =
+            self.subagents.announce_relay_interval_secs.clamp(1, 300);
         self.tool_timeout_overrides = self
             .tool_timeout_overrides
             .drain()
