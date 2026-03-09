@@ -211,6 +211,11 @@ impl ToolRegistry {
             Box::new(subagents::SubagentsListTool::new(db.clone())),
             Box::new(subagents::SubagentsInfoTool::new(db.clone())),
             Box::new(subagents::SubagentsKillTool::new(config, db.clone())),
+            Box::new(subagents::SubagentsRetryAnnouncesTool::new(
+                config,
+                db.clone(),
+                channel_registry.clone(),
+            )),
             Box::new(activate_skill::ActivateSkillTool::new_with_runtime(
                 &skills_data_dir,
                 &config.data_dir,

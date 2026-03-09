@@ -269,14 +269,11 @@ async fn run_sub_agent_task(
     Err("Sub-agent reached maximum iterations without completing the task.".into())
 }
 
-async fn announce_completion(
-    config: &Config,
-    channel_registry: Arc<ChannelRegistry>,
+async fn build_announce_payload(
     db: Arc<Database>,
     chat_id: i64,
-    caller_channel: &str,
     run_id: &str,
-) {
+) -> Result<String, String> {
     let run_id_owned = run_id.to_string();
     let run = match call_blocking(db.clone(), move |db| {
         db.get_subagent_run(&run_id_owned, chat_id)
@@ -284,11 +281,8 @@ async fn announce_completion(
     .await
     {
         Ok(Some(run)) => run,
-        Ok(None) => return,
-        Err(e) => {
-            warn!("subagent announce skipped, failed to load run: {e}");
-            return;
-        }
+        Ok(None) => return Err("run_not_found".into()),
+        Err(e) => return Err(format!("failed_loading_run: {e}")),
     };
 
     let status_emoji = match run.status.as_str() {
@@ -310,18 +304,67 @@ async fn announce_completion(
         text.push_str("\nresult:\n");
         text.push_str(&clipped);
     }
+    Ok(text)
+}
 
-    let bot_username = config.bot_username_for_channel(caller_channel);
-    if let Err(e) = deliver_and_store_bot_message(
-        channel_registry.as_ref(),
-        db.clone(),
-        &bot_username,
-        chat_id,
-        &text,
-    )
+async fn flush_pending_announces(
+    config: &Config,
+    channel_registry: Arc<ChannelRegistry>,
+    db: Arc<Database>,
+    max_batch: usize,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = match call_blocking(db.clone(), move |db| {
+        db.list_due_subagent_announces(&now, max_batch)
+    })
     .await
     {
-        warn!("subagent announce delivery failed: {e}");
+        Ok(v) => v,
+        Err(e) => {
+            warn!("failed to list due subagent announces: {e}");
+            return;
+        }
+    };
+
+    for row in rows {
+        let bot_username = config.bot_username_for_channel(&row.caller_channel);
+        let delivery = deliver_and_store_bot_message(
+            channel_registry.as_ref(),
+            db.clone(),
+            &bot_username,
+            row.chat_id,
+            &row.payload_text,
+        )
+        .await;
+        match delivery {
+            Ok(_) => {
+                let id = row.id;
+                let _ =
+                    call_blocking(db.clone(), move |db| db.mark_subagent_announce_sent(id)).await;
+            }
+            Err(err) => {
+                let next_attempts = row.attempts + 1;
+                let terminal = next_attempts >= 5;
+                let delay_secs = (1_i64 << next_attempts.min(6)) as i64;
+                let next_at = if terminal {
+                    None
+                } else {
+                    Some((chrono::Utc::now() + chrono::Duration::seconds(delay_secs)).to_rfc3339())
+                };
+                let id = row.id;
+                let err_text = err;
+                let _ = call_blocking(db.clone(), move |db| {
+                    db.mark_subagent_announce_retry(
+                        id,
+                        next_attempts,
+                        next_at.as_deref(),
+                        &err_text,
+                        terminal,
+                    )
+                })
+                .await;
+            }
+        }
     }
 }
 
@@ -611,15 +654,20 @@ impl Tool for SessionsSpawnTool {
             runtime.remove_run(&run_id_async);
 
             if cfg.subagents.announce_to_chat {
-                announce_completion(
-                    &cfg,
-                    channel_registry,
-                    db,
-                    chat_id,
-                    &auth.caller_channel,
-                    &run_id_async,
-                )
-                .await;
+                match build_announce_payload(db.clone(), chat_id, &run_id_async).await {
+                    Ok(payload) => {
+                        let rid = run_id_async.clone();
+                        let caller_channel = auth.caller_channel.clone();
+                        let _ = call_blocking(db.clone(), move |db| {
+                            db.enqueue_subagent_announce(&rid, chat_id, &caller_channel, &payload)
+                        })
+                        .await;
+                        flush_pending_announces(&cfg, channel_registry, db, 10).await;
+                    }
+                    Err(e) => {
+                        warn!("failed to build announce payload for run {run_id_async}: {e}");
+                    }
+                }
             }
         });
 
@@ -911,6 +959,73 @@ impl Tool for SubagentsKillTool {
         }
         runtime.cancel_run(&run_id);
         ToolResult::success(json!({"status": "ok", "run_id": run_id}).to_string())
+    }
+}
+
+pub struct SubagentsRetryAnnouncesTool {
+    config: Config,
+    db: Arc<Database>,
+    channel_registry: Arc<ChannelRegistry>,
+}
+
+impl SubagentsRetryAnnouncesTool {
+    pub fn new(config: &Config, db: Arc<Database>, channel_registry: Arc<ChannelRegistry>) -> Self {
+        Self {
+            config: config.clone(),
+            db,
+            channel_registry,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SubagentsRetryAnnouncesTool {
+    fn name(&self) -> &str {
+        "subagents_retry_announces"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "subagents_retry_announces".into(),
+            description:
+                "Manually flush pending subagent completion announcements (control chats only)."
+                    .into(),
+            input_schema: schema_object(
+                json!({
+                    "batch": {"type": "integer", "minimum": 1, "maximum": 200}
+                }),
+                &[],
+            ),
+        }
+    }
+
+    async fn execute(&self, input: serde_json::Value) -> ToolResult {
+        let auth = match auth_context_from_input(&input) {
+            Some(v) => v,
+            None => {
+                return ToolResult::error(
+                    "subagents_retry_announces requires caller auth context".into(),
+                )
+            }
+        };
+        if !auth.is_control_chat() {
+            return ToolResult::error(
+                "Permission denied: subagents_retry_announces requires control chat".into(),
+            );
+        }
+        let batch = input
+            .get("batch")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .clamp(1, 200) as usize;
+        flush_pending_announces(
+            &self.config,
+            self.channel_registry.clone(),
+            self.db.clone(),
+            batch,
+        )
+        .await;
+        ToolResult::success(json!({"status":"ok","batch":batch}).to_string())
     }
 }
 

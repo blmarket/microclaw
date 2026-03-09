@@ -183,7 +183,7 @@ pub struct AuditLogRecord {
 pub type SessionMetaRow = (String, String, Option<String>, Option<i64>);
 pub type SessionTreeRow = (i64, Option<String>, Option<i64>, String);
 
-const SCHEMA_VERSION_CURRENT: i64 = 14;
+const SCHEMA_VERSION_CURRENT: i64 = 15;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -235,6 +235,19 @@ pub struct SubagentRunRecord {
     pub total_tokens: i64,
     pub provider: String,
     pub model: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentAnnounceRecord {
+    pub id: i64,
+    pub run_id: String,
+    pub chat_id: i64,
+    pub caller_channel: String,
+    pub payload_text: String,
+    pub status: String,
+    pub attempts: i64,
+    pub next_attempt_at: Option<String>,
+    pub last_error: Option<String>,
 }
 
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, MicroClawError> {
@@ -702,6 +715,27 @@ fn apply_schema_migrations(conn: &Connection) -> Result<(), MicroClawError> {
         )?;
         set_schema_version(conn, 14)?;
         version = 14;
+    }
+    if version < 15 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS subagent_announces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL UNIQUE,
+                chat_id INTEGER NOT NULL,
+                caller_channel TEXT NOT NULL,
+                payload_text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_subagent_announces_status_next
+                ON subagent_announces(status, next_attempt_at);",
+        )?;
+        set_schema_version(conn, 15)?;
+        version = 15;
     }
     if version != SCHEMA_VERSION_CURRENT {
         set_schema_version(conn, SCHEMA_VERSION_CURRENT)?;
@@ -3789,6 +3823,87 @@ impl Database {
             |row| row.get(0),
         )
         .map_err(Into::into)
+    }
+
+    pub fn enqueue_subagent_announce(
+        &self,
+        run_id: &str,
+        chat_id: i64,
+        caller_channel: &str,
+        payload_text: &str,
+    ) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO subagent_announces(
+                run_id, chat_id, caller_channel, payload_text, status, attempts, next_attempt_at, created_at, updated_at
+            ) VALUES(?1, ?2, ?3, ?4, 'pending', 0, ?5, ?6, ?6)
+            ON CONFLICT(run_id) DO NOTHING",
+            params![run_id, chat_id, caller_channel, payload_text, now, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_due_subagent_announces(
+        &self,
+        now_iso: &str,
+        limit: usize,
+    ) -> Result<Vec<SubagentAnnounceRecord>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, chat_id, caller_channel, payload_text, status, attempts, next_attempt_at, last_error
+             FROM subagent_announces
+             WHERE status IN ('pending', 'retry')
+               AND (next_attempt_at IS NULL OR unixepoch(next_attempt_at) <= unixepoch(?1))
+             ORDER BY id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![now_iso, limit.max(1) as i64], |row| {
+            Ok(SubagentAnnounceRecord {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                chat_id: row.get(2)?,
+                caller_channel: row.get(3)?,
+                payload_text: row.get(4)?,
+                status: row.get(5)?,
+                attempts: row.get(6)?,
+                next_attempt_at: row.get(7)?,
+                last_error: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn mark_subagent_announce_sent(&self, id: i64) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE subagent_announces
+             SET status='sent', updated_at=?2
+             WHERE id=?1",
+            params![id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_subagent_announce_retry(
+        &self,
+        id: i64,
+        attempts: i64,
+        next_attempt_at: Option<&str>,
+        last_error: &str,
+        terminal_fail: bool,
+    ) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let status = if terminal_fail { "failed" } else { "retry" };
+        conn.execute(
+            "UPDATE subagent_announces
+             SET status=?2, attempts=?3, next_attempt_at=?4, last_error=?5, updated_at=?6
+             WHERE id=?1",
+            params![id, status, attempts, next_attempt_at, last_error, now],
+        )?;
+        Ok(())
     }
 }
 
