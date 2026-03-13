@@ -1523,7 +1523,7 @@ impl SetupApp {
                 },
                 Field {
                     key: llm_provider_profiles_key().into(),
-                    label: "LLM profiles (optional)".into(),
+                    label: "LLM provider profiles (optional)".into(),
                     value: existing
                         .get(llm_provider_profiles_key())
                         .cloned()
@@ -2934,7 +2934,7 @@ impl SetupApp {
             "Preset ID",
             "Provider",
             "API key",
-            "Model",
+            "Default model",
             "Base URL",
             "Show thinking",
             "User-Agent (optional)",
@@ -8912,6 +8912,11 @@ subagents:
             SetupApp::key_display(llm_provider_profiles_key()),
             "LLM_PROVIDER_PROFILES"
         );
+    }
+
+    #[test]
+    fn test_provider_preset_field_label_uses_default_model() {
+        assert_eq!(SetupApp::provider_preset_field_labels()[3], "Default model");
     }
 
     #[test]

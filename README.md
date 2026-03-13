@@ -405,7 +405,10 @@ See full manifest schema and examples: `docs/plugins/overview.md`.
 - `/archive` -- archive current in-memory session as markdown
 - `/usage` -- show token usage summary (current chat + global totals)
 - `/status` -- show provider/model plus current chat session/task status
-- `/model` -- show current provider/model (`/model <name>` currently reports switch is not supported yet)
+- `/providers` -- list configured provider profiles and show the active one
+- `/provider` -- show current provider/model (`/provider <profile>` switches the current channel to that profile; `/provider reset` clears it)
+- `/models` -- list configured models for the active provider (`/models api` fetches the live provider model list when supported)
+- `/model` -- show current provider/model (`/model <name>` switches the current channel model override; `/model reset` clears it)
 
 Command handling rules:
 - Any input starting with `/` is treated as a command.
@@ -1011,7 +1014,7 @@ All configuration is via `microclaw.config.yaml`:
 | `bot_username` | No | -- | Telegram bot username (without @; needed for Telegram group mentions) |
 | `llm_provider` | No | `anthropic` | Global main LLM provider profile. Built-ins include `anthropic`, `openai`, `google`, `aliyun-bailian`, `nvidia`, `openrouter`, `ollama`, and `custom` |
 | `model` | No | provider-specific | Model name |
-| `provider_presets.<id>` | No | `{}` | Optional reusable provider profiles for channel/bot overrides. Each profile can define provider, api key, base URL, user-agent, model, and show-thinking |
+| `provider_presets.<id>` | No | `{}` | Optional reusable provider profiles for channel/bot overrides. Each profile can define provider, api key, base URL, user-agent, `default_model`, and show-thinking |
 | `model_prices` | No | `[]` | Optional per-model pricing table (USD per 1M tokens) used by `/usage` cost estimates |
 | `llm_base_url` | No | provider preset default | Custom provider base URL |
 | `openai_compat_body_overrides` | No | `{}` | Global request-body overrides for OpenAI-compatible providers (`openai`, `openrouter`, `deepseek`, `ollama`, etc.) |
