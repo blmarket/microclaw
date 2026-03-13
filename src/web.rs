@@ -4130,44 +4130,40 @@ commands:
         .unwrap();
 
         let mut saw_ack = false;
-        for _ in 0..4 {
-            let msg = recv_ws_json(&mut ws).await;
-            if msg.get("type").and_then(|v| v.as_str()) != Some("res") {
-                continue;
-            }
-            if msg.pointer("/payload/status").and_then(|v| v.as_str()) != Some("started") {
-                continue;
-            }
-            saw_ack = true;
-            break;
-        }
-        assert!(saw_ack, "expected websocket started response");
-
         let mut saw_delta = false;
         let mut saw_final = false;
-        for _ in 0..8 {
-            let evt = recv_ws_json(&mut ws).await;
-            if evt.get("type").and_then(|v| v.as_str()) != Some("event") {
-                continue;
+        for _ in 0..12 {
+            let msg = recv_ws_json(&mut ws).await;
+            match msg.get("type").and_then(|v| v.as_str()) {
+                Some("res")
+                    if msg.pointer("/payload/status").and_then(|v| v.as_str())
+                        == Some("started") =>
+                {
+                    saw_ack = true;
+                }
+                Some("event") if msg.get("event").and_then(|v| v.as_str()) == Some("chat") => {
+                    let state = msg.pointer("/payload/state").and_then(|v| v.as_str());
+                    if state == Some("delta") {
+                        saw_delta = true;
+                    }
+                    if state == Some("final") {
+                        saw_final = true;
+                        assert_eq!(
+                            msg.pointer("/payload/sessionKey").and_then(|v| v.as_str()),
+                            Some("main")
+                        );
+                    }
+                }
+                _ => {}
             }
-            if evt.get("event").and_then(|v| v.as_str()) != Some("chat") {
-                continue;
-            }
-            let state = evt.pointer("/payload/state").and_then(|v| v.as_str());
-            if state == Some("delta") {
-                saw_delta = true;
-            }
-            if state == Some("final") {
-                saw_final = true;
-                assert_eq!(
-                    evt.pointer("/payload/sessionKey").and_then(|v| v.as_str()),
-                    Some("main")
-                );
+
+            if saw_ack && saw_delta && saw_final {
                 break;
             }
         }
-        assert!(saw_delta);
-        assert!(saw_final);
+        assert!(saw_ack, "expected websocket started response");
+        assert!(saw_delta, "expected websocket delta event");
+        assert!(saw_final, "expected websocket final event");
 
         server.abort();
     }
