@@ -243,6 +243,7 @@ const PROVIDER_SUGGESTIONS = [
   'openrouter',
   'anthropic',
   'google',
+  'aliyun-bailian',
   'alibaba',
   'deepseek',
   'moonshot',
@@ -254,6 +255,7 @@ const PROVIDER_SUGGESTIONS = [
   'cohere',
   'tencent',
   'xai',
+  'nvidia',
   'huggingface',
   'together',
   'custom',
@@ -267,6 +269,8 @@ const MODEL_OPTIONS: Record<string, string[]> = {
   openrouter: ['openai/gpt-5', 'anthropic/claude-sonnet-4-5', 'google/gemini-2.5-pro'],
   deepseek: ['deepseek-chat', 'deepseek-reasoner'],
   google: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+  'aliyun-bailian': ['qwen3.5-plus', 'qwen3-max', 'qwen-plus-latest'],
+  nvidia: ['meta/llama-3.3-70b-instruct', 'meta/llama-3.1-70b-instruct'],
 }
 
 const DEFAULT_CONFIG_VALUES = {
@@ -737,6 +741,9 @@ function defaultModelForProvider(providerRaw: string): string {
   if (provider === 'anthropic') return 'claude-sonnet-4-5-20250929'
   if (provider === 'openai-codex') return 'gpt-5.3-codex'
   if (provider === 'ollama') return 'llama3.2'
+  if (provider === 'google') return 'gemini-2.5-pro'
+  if (provider === 'aliyun-bailian') return 'qwen3.5-plus'
+  if (provider === 'nvidia') return 'meta/llama-3.3-70b-instruct'
   return 'gpt-5.2'
 }
 

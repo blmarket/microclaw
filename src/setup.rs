@@ -763,6 +763,13 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         ],
     },
     ProviderPreset {
+        id: "aliyun-bailian",
+        label: "Alibaba Cloud Bailian",
+        protocol: ProviderProtocol::OpenAiCompat,
+        default_base_url: "https://coding.dashscope.aliyuncs.com/v1",
+        models: &["qwen3.5-plus", "qwen3-max", "qwen-plus-latest"],
+    },
+    ProviderPreset {
         id: "alibaba",
         label: "Alibaba Cloud (Qwen / DashScope)",
         protocol: ProviderProtocol::OpenAiCompat,
@@ -881,6 +888,17 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         models: &["grok-4", "grok-4-fast", "grok-3"],
     },
     ProviderPreset {
+        id: "nvidia",
+        label: "NVIDIA NIM",
+        protocol: ProviderProtocol::OpenAiCompat,
+        default_base_url: "https://integrate.api.nvidia.com/v1",
+        models: &[
+            "meta/llama-3.3-70b-instruct",
+            "meta/llama-3.1-70b-instruct",
+            "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+        ],
+    },
+    ProviderPreset {
         id: "huggingface",
         label: "Hugging Face",
         protocol: ProviderProtocol::OpenAiCompat,
@@ -927,6 +945,23 @@ fn default_model_for_provider(provider: &str) -> &'static str {
     find_provider_preset(provider)
         .and_then(|p| p.models.first().copied())
         .unwrap_or("gpt-5.2")
+}
+
+fn normalize_setup_provider_id(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if find_provider_preset(trimmed).is_some() {
+        return trimmed.to_ascii_lowercase();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(suffix) = lower.strip_prefix("custom") {
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return "custom".to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn provider_display(provider: &str) -> String {
@@ -1076,10 +1111,12 @@ impl SetupApp {
     fn new() -> Self {
         // Try loading from existing config file first, then fall back to env vars
         let existing = Self::load_existing_config();
-        let provider = existing
-            .get("LLM_PROVIDER")
-            .cloned()
-            .unwrap_or_else(|| "anthropic".into());
+        let provider = normalize_setup_provider_id(
+            &existing
+                .get("LLM_PROVIDER")
+                .cloned()
+                .unwrap_or_else(|| "anthropic".into()),
+        );
         let default_model = default_model_for_provider(&provider);
         let default_base_url = find_provider_preset(&provider)
             .map(|p| p.default_base_url)
@@ -1486,7 +1523,7 @@ impl SetupApp {
                 },
                 Field {
                     key: llm_provider_profiles_key().into(),
-                    label: "LLM provider profiles (optional)".into(),
+                    label: "LLM profiles (optional)".into(),
                     value: existing
                         .get(llm_provider_profiles_key())
                         .cloned()
@@ -2704,7 +2741,11 @@ impl SetupApp {
 
     fn set_field_value(&mut self, key: &str, value: String) {
         if let Some(field) = self.fields.iter_mut().find(|f| f.key == key) {
-            field.value = value;
+            field.value = if key == "LLM_PROVIDER" {
+                normalize_setup_provider_id(&value)
+            } else {
+                value
+            };
         }
     }
 
@@ -2891,9 +2932,9 @@ impl SetupApp {
             "Provider",
             "API key",
             "Base URL",
-            "User-Agent",
             "Model",
             "Show thinking",
+            "User-Agent (optional)",
         ]
     }
 
@@ -2906,9 +2947,9 @@ impl SetupApp {
             1 => entry.provider.clone(),
             2 => entry.api_key.clone(),
             3 => entry.base_url.clone(),
-            4 => entry.user_agent.clone(),
-            5 => entry.default_model.clone(),
-            6 => entry.show_thinking.to_string(),
+            4 => entry.default_model.clone(),
+            5 => entry.show_thinking.to_string(),
+            6 => entry.user_agent.clone(),
             _ => String::new(),
         }
     }
@@ -2959,7 +3000,7 @@ impl SetupApp {
         page.entries.push(cloned.clone());
         page.selected = page.entries.len().saturating_sub(1);
         page.mode = ProviderPresetPageMode::Edit;
-        page.field_selected = 5;
+        page.field_selected = 4;
         page.editing = false;
         self.sync_provider_preset_page_field()?;
         Ok(Some(cloned.id))
@@ -3014,9 +3055,9 @@ impl SetupApp {
                 1 => entry.provider = value,
                 2 => entry.api_key = value,
                 3 => entry.base_url = value,
-                4 => entry.user_agent = value,
-                5 => entry.default_model = value,
-                6 => entry.show_thinking = parse_bool_like(&value).unwrap_or(false),
+                4 => entry.default_model = value,
+                5 => entry.show_thinking = parse_bool_like(&value).unwrap_or(false),
+                6 => entry.user_agent = value,
                 _ => {}
             }
         }
@@ -4971,8 +5012,8 @@ impl SetupApp {
                 "Example: OpenClaw-Gateway/1.0",
             ),
             _ if key == llm_provider_profiles_key() => (
-                "Reusable preset definitions keyed by preset id. Press Enter to open the preset editor.",
-                "Example: create preset provider1 for OpenAI, then let channels/bots select provider1",
+                "Reusable profile definitions keyed by profile id. Press Enter to open the profile editor.",
+                "Example: create profile provider1 for OpenAI, then let channels/bots select provider1",
             ),
             "SHOW_THINKING" => (
                 "Show model reasoning/thinking text in channel output when provider supports it.",
@@ -5121,8 +5162,8 @@ impl SetupApp {
                 "Example: choose provider1 or leave empty for main",
             ),
             _ if key.ends_with("_LLM_PROVIDER") => (
-                "Per-channel/per-account preset id override. Empty means use main/global default.",
-                "Example: 1",
+                "Per-channel/per-account profile id override. Empty means use main/global default.",
+                "Example: provider1",
             ),
             _ if key.ends_with("_LLM_API_KEY") => (
                 "Per-channel/per-account API key override.",
@@ -5507,14 +5548,28 @@ fn send_openai_validation_chat_request(
 }
 
 fn extract_openai_error_detail(status: reqwest::StatusCode, text: &str) -> String {
+    fn extract_message(value: &serde_json::Value) -> Option<String> {
+        if let Some(message) = value.get("message").and_then(|m| m.as_str()) {
+            return Some(message.to_string());
+        }
+        if let Some(error) = value.get("error") {
+            if let Some(message) = extract_message(error) {
+                return Some(message);
+            }
+        }
+        if let Some(items) = value.as_array() {
+            for item in items {
+                if let Some(message) = extract_message(item) {
+                    return Some(message);
+                }
+            }
+        }
+        None
+    }
+
     serde_json::from_str::<serde_json::Value>(text)
         .ok()
-        .and_then(|v| {
-            v.get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .map(|s| s.to_string())
-        })
+        .and_then(|v| extract_message(&v))
         .unwrap_or_else(|| format!("HTTP {status}"))
 }
 
@@ -6933,9 +6988,9 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
                             }
                         }
                         3 => entry.base_url.clone(),
-                        4 => entry.user_agent.clone(),
-                        5 => entry.default_model.clone(),
-                        6 => entry.show_thinking.to_string(),
+                        4 => entry.default_model.clone(),
+                        5 => entry.show_thinking.to_string(),
+                        6 => entry.user_agent.clone(),
                         _ => String::new(),
                     };
                     let style = if selected {
@@ -7543,9 +7598,9 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                                 app.status = "Updated provider profile field".into();
                             } else if selected_field == 1 {
                                 app.open_provider_preset_provider_picker();
-                            } else if selected_field == 5 {
+                            } else if selected_field == 4 {
                                 app.open_provider_preset_model_picker();
-                            } else if selected_field == 6 {
+                            } else if selected_field == 5 {
                                 app.toggle_selected_provider_preset_show_thinking();
                                 let _ = app.sync_provider_preset_page_field();
                                 app.status = "Toggled provider profile show_thinking".into();
@@ -8295,6 +8350,22 @@ subagents:
     }
 
     #[test]
+    fn test_normalize_setup_provider_id_collapses_custom_suffixes() {
+        assert_eq!(normalize_setup_provider_id("custom18"), "custom");
+        assert_eq!(normalize_setup_provider_id("CUSTOM42"), "custom");
+        assert_eq!(normalize_setup_provider_id("anthropic"), "anthropic");
+    }
+
+    #[test]
+    fn test_extract_openai_error_detail_handles_array_wrapped_messages() {
+        let detail = extract_openai_error_detail(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"[{"error":{"message":"Request contains an invalid argument."}}]"#,
+        );
+        assert_eq!(detail, "Request contains an invalid argument.");
+    }
+
+    #[test]
     fn test_save_config_yaml_writes_provider_presets_and_channel_refs() {
         let yaml_path = std::env::temp_dir().join(format!(
             "microclaw_setup_provider_presets_test_{}.yaml",
@@ -8430,7 +8501,7 @@ subagents:
         assert_eq!(page.entries.len(), 2);
         assert_eq!(page.selected, 1);
         assert!(matches!(page.mode, ProviderPresetPageMode::Edit));
-        assert_eq!(page.field_selected, 5);
+        assert_eq!(page.field_selected, 4);
         assert!(!page.editing);
         assert_eq!(page.entries[1].id, "provider1-2");
         assert_eq!(page.entries[1].provider, "anthropic");
@@ -9750,5 +9821,7 @@ sandbox:
         assert!(find_provider_preset("synthetic").is_some());
         assert!(find_provider_preset("chutes").is_some());
         assert!(find_provider_preset("qwen-portal").is_some());
+        assert!(find_provider_preset("aliyun-bailian").is_some());
+        assert!(find_provider_preset("nvidia").is_some());
     }
 }
