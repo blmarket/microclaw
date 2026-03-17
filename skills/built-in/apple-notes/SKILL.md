@@ -1,12 +1,8 @@
 ---
 name: apple-notes
-description: Manage Apple Notes on macOS using the `memo` CLI. Use this when users ask to create, list, search, edit, move, or export Apple Notes.
+description: "Manage Apple Notes on macOS using the `memo` CLI. Use when users ask to create, list, search, edit, move, delete, or export Apple Notes. Triggers on mentions of notes, Apple Notes, memo, jot something down, or note-taking."
 license: Proprietary. LICENSE.txt has complete terms
-compatibility:
-  os:
-    - darwin
-  deps:
-    - memo
+compatibility: "macOS only. Requires memo CLI (brew tap antoniorodr/memo && brew install antoniorodr/memo/memo)."
 ---
 
 # Apple Notes (memo CLI)
