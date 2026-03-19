@@ -27,6 +27,28 @@ If a hook times out or crashes, runtime skips the hook and continues.
 - Create branch: `POST /api/sessions/fork`
 - Deleting parent session does not cascade to children.
 
+## ACP Subagent Runtime
+
+- Symptom: `sessions_spawn(runtime="acp")` returns `ACP runtime is disabled`
+  - Set `subagents.acp.enabled: true`
+  - Set `subagents.acp.command` to an ACP-compatible agent executable, or add at least one enabled target under `subagents.acp.targets`
+
+- Symptom: ACP run is accepted but later fails quickly
+  - Verify the selected ACP command starts and speaks ACP over stdio
+  - Check `subagents_log` for the run and inspect stderr included in the failure
+  - Confirm the chat working directory contains the repo/context the external agent expects
+
+- Symptom: `sessions_spawn(runtime="acp")` returns unknown target or multiple target errors
+  - Pass `runtime_target` when using named ACP workers
+  - Or set `subagents.acp.default_target` so plain `runtime="acp"` has a stable default
+  - Verify target names under `subagents.acp.targets`
+
+- Operational notes:
+  - ACP-backed subagents reuse the normal `subagent_runs` lifecycle and announce path
+  - ACP file and terminal operations are scoped to the chat working directory
+  - `subagents_log` now records ACP permission, plan, tool-call, file, and terminal events
+  - ACP permission requests are still operator-configurable and may be auto-approved, so keep the feature operator-controlled
+
 ## Gateway Bridge Issues
 
 - Symptom: Mission Control / OpenClaw operator cannot connect

@@ -3664,6 +3664,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_config_self_check_warns_for_acp_runtime_risks() {
+        let mut cfg = test_config_template();
+        cfg.subagents.acp.default_target.enabled = true;
+        cfg.subagents.acp.default_target.command = "definitely-missing-acp-command".into();
+        cfg.subagents.acp.default_target.auto_approve = true;
+        cfg.subagents.acp.default_target_name = Some("worker".into());
+        cfg.subagents.acp.targets.insert(
+            "worker".into(),
+            crate::config::SubagentAcpTargetConfig {
+                enabled: true,
+                command: "also-missing-worker-command".into(),
+                auto_approve: false,
+                ..crate::config::SubagentAcpTargetConfig::default()
+            },
+        );
+        let state = test_state_with_config(Box::new(DummyLlm), cfg);
+        let web_state = test_web_state_from_app_state(state, WebLimits::default());
+        let app = build_router(web_state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/config/self_check")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let warnings = json
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        assert!(warnings.iter().any(|w| {
+            w.get("code").and_then(|v| v.as_str()) == Some("acp_target_command_missing")
+        }));
+        assert!(warnings.iter().any(|w| {
+            w.get("code").and_then(|v| v.as_str()) == Some("acp_named_target_command_missing")
+        }));
+    }
+
+    #[tokio::test]
     async fn test_config_self_check_warns_for_non_strict_web_fetch_validation() {
         let mut cfg = test_config_template();
         cfg.web_fetch_validation.strict_mode = false;
@@ -4679,8 +4724,7 @@ commands:
                     if candidate.get("event").and_then(|v| v.as_str()) != Some("chat") {
                         continue;
                     }
-                    if candidate.pointer("/payload/state").and_then(|v| v.as_str())
-                        != Some("final")
+                    if candidate.pointer("/payload/state").and_then(|v| v.as_str()) != Some("final")
                     {
                         continue;
                     }
