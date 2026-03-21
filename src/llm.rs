@@ -8,7 +8,9 @@ use tracing::debug;
 use std::collections::HashSet;
 use std::process::Stdio;
 
-use crate::codex_auth::is_codex_app_provider;
+use crate::codex_auth::{
+    is_codex_app_provider, refresh_openai_codex_auth_if_needed, resolve_codex_chatgpt_auth_tokens,
+};
 use crate::config::Config;
 #[cfg(test)]
 use crate::config::WorkingDirIsolation;
@@ -263,11 +265,10 @@ impl CodexAppServerProvider {
                     "personality": "pragmatic",
                     "ephemeral": true,
                     "experimentalRawEvents": false,
-                    "persistExtendedHistory": false,
+                    "persistExtendedHistory": true,
                     "config": {
                         "web_search": "disabled",
                         "tools": {
-                            "web_search": null,
                             "view_image": false,
                         }
                     }
@@ -418,6 +419,26 @@ async fn codex_app_server_write_error(
     Ok(())
 }
 
+async fn codex_app_server_chatgpt_auth_refresh_result(
+    previous_account_id: Option<String>,
+) -> Result<serde_json::Value, MicroClawError> {
+    tokio::task::spawn_blocking(move || {
+        refresh_openai_codex_auth_if_needed()?;
+        let auth = resolve_codex_chatgpt_auth_tokens()?;
+        Ok(json!({
+            "accessToken": auth.bearer_token,
+            "chatgptAccountId": auth.account_id.or(previous_account_id).unwrap_or_default(),
+            "chatgptPlanType": Option::<String>::None,
+        }))
+    })
+    .await
+    .map_err(|err| {
+        MicroClawError::LlmApi(format!(
+            "Failed to resolve Codex auth for app-server refresh: {err}"
+        ))
+    })?
+}
+
 async fn codex_app_server_read_message(
     lines: &mut CodexAppServerLines,
 ) -> Result<serde_json::Value, MicroClawError> {
@@ -492,6 +513,17 @@ async fn codex_app_server_respond_to_server_request(
                 }),
             )
             .await
+        }
+        "account/chatgptAuthTokens/refresh" => {
+            let previous_account_id = message
+                .get("params")
+                .and_then(|v| v.get("previousAccountId"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            match codex_app_server_chatgpt_auth_refresh_result(previous_account_id).await {
+                Ok(result) => codex_app_server_write_result(stdin, id, result).await,
+                Err(err) => codex_app_server_write_error(stdin, id, &err.to_string()).await,
+            }
         }
         "applyPatchApproval" | "execCommandApproval" => {
             codex_app_server_write_result(stdin, id, json!({"decision": "denied"})).await

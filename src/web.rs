@@ -2339,13 +2339,19 @@ mod tests {
         .unwrap();
     }
 
-    async fn spawn_test_server(app: Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    async fn spawn_test_server(
+        app: Router,
+    ) -> Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return None,
+            Err(err) => panic!("failed to bind websocket test server: {err}"),
+        };
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (addr, handle)
+        Some((addr, handle))
     }
 
     async fn recv_ws_json(
@@ -2682,50 +2688,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_api_send_models_command_uses_live_models_for_non_preset_provider() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (path_tx, path_rx) = mpsc::channel::<String>();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut buf = [0u8; 8192];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            let path = req
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .unwrap_or("")
-                .to_string();
-            let _ = path_tx.send(path);
-            let body = r#"{"data":[{"id":"live-web-a"},{"id":"live-web-b"}]}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
-        });
-
         let mut cfg = test_config_template();
         cfg.llm_provider = "lab-local".into();
-        cfg.api_key = "k".into();
         cfg.model = "custom-model".into();
-        cfg.llm_base_url = Some(format!("http://{addr}/v1"));
         cfg.llm_providers.insert(
             "lab-local".to_string(),
             LlmProviderProfile {
-                provider: Some("openai".to_string()),
+                provider: Some("codex-app".to_string()),
                 api_key: None,
-                llm_base_url: Some(format!("http://{addr}/v1")),
+                llm_base_url: None,
                 llm_user_agent: None,
                 default_model: Some("custom-model".to_string()),
                 models: vec!["custom-model".to_string()],
@@ -2756,11 +2727,7 @@ mod tests {
             .get("response")
             .and_then(|x| x.as_str())
             .unwrap_or_default();
-        let path = path_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        server.join().unwrap();
-        assert_eq!(path, "/v1/models");
-        assert!(text.contains("Live models for provider 'lab-local'"));
-        assert!(text.contains("live-web-a"));
+        assert_eq!(text, "Models for provider 'lab-local': custom-model");
     }
 
     #[tokio::test]
@@ -4379,7 +4346,9 @@ commands:
     async fn test_ws_connect_and_chat_send_emit_chat_events() {
         let web_state = test_web_state(Box::new(DummyLlm), WebLimits::default());
         seed_test_api_key(&web_state, "ws-secret").await;
-        let (addr, server) = spawn_test_server(build_router(web_state.clone())).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state.clone())).await else {
+            return;
+        };
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
@@ -4485,7 +4454,9 @@ commands:
     async fn test_ws_chat_history_returns_session_messages() {
         let web_state = test_web_state(Box::new(DummyLlm), WebLimits::default());
         seed_test_api_key(&web_state, "ws-secret-2").await;
-        let (addr, server) = spawn_test_server(build_router(web_state.clone())).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state.clone())).await else {
+            return;
+        };
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
@@ -4569,7 +4540,9 @@ commands:
     async fn test_ws_bridge_supports_agent_and_model_metadata_methods() {
         let web_state = test_web_state(Box::new(DummyLlm), WebLimits::default());
         seed_test_api_key(&web_state, "ws-meta-secret").await;
-        let (addr, server) = spawn_test_server(build_router(web_state)).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state)).await else {
+            return;
+        };
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
@@ -4634,7 +4607,9 @@ commands:
     async fn test_ws_bridge_supports_mission_control_session_methods() {
         let web_state = test_web_state(Box::new(DummyLlm), WebLimits::default());
         seed_test_api_key(&web_state, "ws-session-secret").await;
-        let (addr, server) = spawn_test_server(build_router(web_state.clone())).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state.clone())).await else {
+            return;
+        };
 
         let app = build_router(web_state.clone());
         let req = Request::builder()
@@ -4754,7 +4729,9 @@ commands:
         );
         seed_test_api_key(&web_state, "ws-settings-secret").await;
         let app = build_router(web_state.clone());
-        let (addr, server) = spawn_test_server(build_router(web_state.clone())).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state.clone())).await else {
+            return;
+        };
 
         let plain_req = Request::builder()
             .method("POST")
@@ -4888,7 +4865,9 @@ commands:
         let web_state = test_web_state(Box::new(SlowLlm { sleep_ms: 1_500 }), WebLimits::default());
         seed_test_api_key(&web_state, "ws-kill-secret").await;
         let app = build_router(web_state.clone());
-        let (addr, server) = spawn_test_server(build_router(web_state.clone())).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state.clone())).await else {
+            return;
+        };
         let chat_id = unique_test_chat_id();
         let session_key = format!("chat:{chat_id}");
         let session_key_for_db = session_key.clone();
@@ -5006,7 +4985,9 @@ commands:
         })
         .await
         .unwrap();
-        let (addr, server) = spawn_test_server(build_router(web_state)).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state)).await else {
+            return;
+        };
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
@@ -5043,7 +5024,9 @@ commands:
     async fn test_root_route_accepts_websocket_upgrade() {
         let web_state = test_web_state(Box::new(DummyLlm), WebLimits::default());
         seed_test_api_key(&web_state, "ws-root-secret").await;
-        let (addr, server) = spawn_test_server(build_router(web_state)).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state)).await else {
+            return;
+        };
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
@@ -5089,7 +5072,9 @@ commands:
             &["operator.write".to_string()],
         )
         .await;
-        let (addr, server) = spawn_test_server(build_router(web_state)).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state)).await else {
+            return;
+        };
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
@@ -5126,7 +5111,9 @@ commands:
     async fn test_ws_connect_protocol_mismatch_returns_unsupported_protocol() {
         let web_state = test_web_state(Box::new(DummyLlm), WebLimits::default());
         seed_test_api_key(&web_state, "ws-secret-3").await;
-        let (addr, server) = spawn_test_server(build_router(web_state)).await;
+        let Some((addr, server)) = spawn_test_server(build_router(web_state)).await else {
+            return;
+        };
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await

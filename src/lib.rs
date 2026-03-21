@@ -50,6 +50,6 @@ pub mod test_support {
         ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("env lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }

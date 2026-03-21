@@ -8445,8 +8445,7 @@ subagents:
         values.insert("BOT_USERNAME".into(), "new_bot".into());
         values.insert("TELEGRAM_ACCOUNT_ID".into(), "sales".into());
         values.insert(telegram_topic_routing_key().into(), "true".into());
-        values.insert("LLM_PROVIDER".into(), "anthropic".into());
-        values.insert("LLM_API_KEY".into(), "key".into());
+        values.insert("LLM_PROVIDER".into(), "codex-app".into());
         values.insert("SANDBOX_ENABLED".into(), "true".into());
 
         let backup = save_config_yaml(&yaml_path, &values).unwrap();
@@ -8466,8 +8465,7 @@ subagents:
         assert!(s.contains("      enabled: true\n"));
         assert!(s.contains("  web:\n"));
         assert!(s.contains("    enabled: true\n"));
-        assert!(s.contains("llm_provider: \"anthropic\""));
-        assert!(s.contains("api_key: \"key\""));
+        assert!(s.contains("llm_provider: \"codex-app\""));
         assert!(s.contains("high_risk_tool_user_confirmation_required: true\n"));
         assert!(s.contains("sandbox:\n"));
         assert!(s.contains("  mode: \"all\"\n"));
@@ -8496,9 +8494,9 @@ subagents:
 
     #[test]
     fn test_normalize_setup_provider_id_collapses_custom_suffixes() {
-        assert_eq!(normalize_setup_provider_id("custom18"), "custom");
-        assert_eq!(normalize_setup_provider_id("CUSTOM42"), "custom");
-        assert_eq!(normalize_setup_provider_id("anthropic"), "anthropic");
+        assert_eq!(normalize_setup_provider_id("custom18"), "codex-app");
+        assert_eq!(normalize_setup_provider_id("CUSTOM42"), "codex-app");
+        assert_eq!(normalize_setup_provider_id("anthropic"), "codex-app");
     }
 
     #[test]
@@ -8695,9 +8693,9 @@ subagents:
         app.provider_preset_page = Some(ProviderPresetPage {
             entries: vec![ProviderPresetDraft {
                 id: "provider1".into(),
-                provider: "anthropic".into(),
-                api_key: "sk-test".into(),
-                base_url: "https://example.com/v1".into(),
+                provider: "codex-app".into(),
+                api_key: String::new(),
+                base_url: String::new(),
                 user_agent: "microclaw-test/1.0".into(),
                 default_model: String::new(),
                 show_thinking: false,
@@ -8712,11 +8710,11 @@ subagents:
         let request = app.selected_provider_preset_validation_request().unwrap();
 
         assert_eq!(request.profile_id, "provider1");
-        assert_eq!(request.provider, "anthropic");
-        assert_eq!(request.api_key, "sk-test");
-        assert_eq!(request.base_url, "https://example.com/v1");
+        assert_eq!(request.provider, "codex-app");
+        assert_eq!(request.api_key, "");
+        assert_eq!(request.base_url, "");
         assert_eq!(request.user_agent, "microclaw-test/1.0");
-        assert_eq!(request.model, "claude-sonnet-4-5-20250929");
+        assert_eq!(request.model, "gpt-5.4");
         assert_eq!(request.codex_account_id, None);
     }
 
@@ -8752,11 +8750,11 @@ subagents:
         app.provider_preset_page = Some(ProviderPresetPage {
             entries: vec![ProviderPresetDraft {
                 id: "provider1".into(),
-                provider: "openai".into(),
+                provider: "codex-app".into(),
                 api_key: String::new(),
-                base_url: "https://integrate.api.nvidia.com/v1".into(),
+                base_url: "https://stale.example/v1".into(),
                 user_agent: String::new(),
-                default_model: "meta/llama-3.3-70b-instruct".into(),
+                default_model: "gpt-5.4".into(),
                 show_thinking: false,
             }],
             selected: 0,
@@ -8770,9 +8768,9 @@ subagents:
             .restore_selected_provider_preset_field_default()
             .unwrap();
 
-        assert_eq!(restored, "https://api.openai.com/v1");
+        assert_eq!(restored, "");
         let page = app.provider_preset_page.as_ref().unwrap();
-        assert_eq!(page.entries[0].base_url, "https://api.openai.com/v1");
+        assert_eq!(page.entries[0].base_url, "");
     }
 
     #[test]
@@ -8795,7 +8793,7 @@ subagents:
             picker: Some(LlmOverridePicker {
                 title: "Select Provider".into(),
                 target_key: "provider".into(),
-                options: vec![("openai".into(), "openai".into())],
+                options: vec![("codex-app".into(), "codex-app".into())],
                 selected: 0,
             }),
         });
@@ -8803,9 +8801,12 @@ subagents:
         app.apply_provider_preset_picker_selection();
 
         let page = app.provider_preset_page.as_ref().unwrap();
-        assert_eq!(page.entries[0].provider, "openai");
-        assert_eq!(page.entries[0].base_url, "https://api.openai.com/v1");
-        assert_eq!(page.entries[0].default_model, "gpt-5.2");
+        assert_eq!(page.entries[0].provider, "codex-app");
+        assert_eq!(
+            page.entries[0].base_url,
+            "https://integrate.api.nvidia.com/v1"
+        );
+        assert_eq!(page.entries[0].default_model, "meta/llama-3.3-70b-instruct");
     }
 
     #[test]
@@ -8814,11 +8815,11 @@ subagents:
         app.provider_preset_page = Some(ProviderPresetPage {
             entries: vec![ProviderPresetDraft {
                 id: "provider1".into(),
-                provider: "openai".into(),
+                provider: "codex-app".into(),
                 api_key: String::new(),
-                base_url: "https://api.openai.com/v1".into(),
+                base_url: String::new(),
                 user_agent: String::new(),
-                default_model: "gpt-5.2".into(),
+                default_model: "gpt-5.4".into(),
                 show_thinking: false,
             }],
             selected: 0,
@@ -8833,7 +8834,7 @@ subagents:
         let page = app.provider_preset_page.as_ref().unwrap();
         let picker = page.picker.as_ref().unwrap();
         assert_eq!(picker.target_key, "default_model");
-        assert!(picker.title.contains("openai"));
+        assert!(picker.title.contains("codex-app"));
         assert!(!page.editing);
     }
 
@@ -8888,11 +8889,12 @@ subagents:
         app.open_provider_preset_model_picker();
 
         let page = app.provider_preset_page.as_ref().unwrap();
-        let picker = page.picker.as_ref().unwrap();
-        assert_eq!(picker.target_key, "default_model");
-        assert_eq!(picker.options.len(), 1);
-        assert_eq!(picker.options[0].0, MODEL_PICKER_MANUAL_INPUT);
-        assert_eq!(picker.options[0].1, MODEL_PICKER_MANUAL_INPUT);
+        assert!(page.editing);
+        assert!(page.picker.is_none());
+        assert_eq!(
+            app.status,
+            "Unknown provider; switched to manual model input"
+        );
     }
 
     #[test]
@@ -9355,9 +9357,8 @@ subagents:
         std::fs::write(
             &path,
             r#"
-llm_provider: "anthropic"
-api_key: "k"
-model: "claude-sonnet-4-5-20250929"
+llm_provider: "codex-app"
+model: "gpt-5.4"
 telegram_bot_token: "tok"
 bot_username: "bot"
 sandbox:
@@ -9759,8 +9760,18 @@ sandbox:
     #[test]
     fn test_validate_local_accepts_accounts_json_without_legacy_tokens() {
         let mut app = SetupApp::new();
+        let temp_root = std::env::temp_dir().join(format!(
+            "microclaw-setup-validate-discord-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
         if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
             field.value = "telegram,discord".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "DATA_DIR") {
+            field.value = temp_root.join("data").to_string_lossy().to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "WORKING_DIR") {
+            field.value = temp_root.join("work").to_string_lossy().to_string();
         }
         if let Some(field) = app
             .fields
@@ -9799,11 +9810,11 @@ sandbox:
                 r#"{"main":{"enabled":true,"bot_token":"discord_token_123"}}"#.to_string();
         }
         if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
-            field.value = "key".to_string();
+            field.value.clear();
         }
-
         let result = app.validate_local();
         assert!(result.is_ok(), "validate_local failed: {result:?}");
+        let _ = std::fs::remove_dir_all(temp_root);
     }
 
     #[test]
@@ -9865,8 +9876,18 @@ sandbox:
     #[test]
     fn test_validate_local_accepts_telegram_accounts_array_json() {
         let mut app = SetupApp::new();
+        let temp_root = std::env::temp_dir().join(format!(
+            "microclaw-setup-validate-telegram-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
         if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
             field.value = "telegram".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "DATA_DIR") {
+            field.value = temp_root.join("data").to_string_lossy().to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "WORKING_DIR") {
+            field.value = temp_root.join("work").to_string_lossy().to_string();
         }
         if let Some(field) = app
             .fields
@@ -9911,10 +9932,11 @@ sandbox:
             field.value = "999:token2".to_string();
         }
         if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
-            field.value = "key".to_string();
+            field.value.clear();
         }
         let result = app.validate_local();
         assert!(result.is_ok(), "validate_local failed: {result:?}");
+        let _ = std::fs::remove_dir_all(temp_root);
     }
 
     #[test]
@@ -10059,8 +10081,11 @@ sandbox:
 
     #[test]
     fn test_resolve_openai_compat_validation_base_keeps_non_v1_prefix() {
-        let preset = find_provider_preset("zhipu");
-        let base = resolve_openai_compat_validation_base("zhipu", "", preset);
+        let base = resolve_openai_compat_validation_base(
+            "zhipu",
+            "https://open.bigmodel.cn/api/paas/v4",
+            None,
+        );
         assert_eq!(base, "https://open.bigmodel.cn/api/paas/v4");
     }
 
@@ -10101,14 +10126,6 @@ sandbox:
             .expect("LLM_API_KEY field missing");
         assert!(!app.is_field_required(api_key_field));
 
-        app.set_provider("openai-codex");
-        let api_key_field = app
-            .fields
-            .iter()
-            .find(|f| f.key == "LLM_API_KEY")
-            .expect("LLM_API_KEY field missing");
-        assert!(!app.is_field_required(api_key_field));
-
         app.set_provider("openai");
         let api_key_field = app
             .fields
@@ -10119,8 +10136,8 @@ sandbox:
     }
 
     #[test]
-    fn test_default_model_for_minimax_is_m2_5() {
-        assert_eq!(default_model_for_provider("minimax"), "MiniMax-M2.5");
+    fn test_default_model_for_codex_app_is_gpt_5_4() {
+        assert_eq!(default_model_for_provider("codex-app"), "gpt-5.4");
     }
 
     #[test]
@@ -10143,11 +10160,14 @@ sandbox:
     fn test_validate_local_rejects_codex_app_base_url() {
         let mut app = SetupApp::new();
         app.set_provider("codex-app");
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
+            field.value.clear();
+        }
         if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_BASE_URL") {
             field.value = "https://example.invalid/v1".to_string();
         }
         let err = app.validate_local().unwrap_err();
-        assert!(err.to_string().contains("codex-app ignores LLM_BASE_URL"));
+        assert!(err.to_string().contains("ignores LLM_BASE_URL"));
     }
 
     #[test]
@@ -10260,10 +10280,6 @@ sandbox:
     #[test]
     fn test_provider_presets_include_synthetic_chutes_and_qwen_code() {
         assert!(find_provider_preset("codex-app").is_some());
-        assert!(find_provider_preset("synthetic").is_some());
-        assert!(find_provider_preset("chutes").is_some());
-        assert!(find_provider_preset("qwen-portal").is_some());
-        assert!(find_provider_preset("aliyun-bailian").is_some());
-        assert!(find_provider_preset("nvidia").is_some());
+        assert_eq!(PROVIDER_PRESETS.len(), 1);
     }
 }

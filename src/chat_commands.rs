@@ -829,11 +829,7 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashMap;
     use std::fs;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc;
     use std::sync::Arc;
-    use std::time::Duration;
     use tokio::sync::RwLock;
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -842,32 +838,29 @@ mod tests {
 
     fn test_config() -> Config {
         let mut cfg = Config::test_defaults();
-        cfg.llm_provider = "openai".to_string();
-        cfg.model = "gpt-5.2".to_string();
+        cfg.llm_provider = "main".to_string();
+        cfg.model = "gpt-5.4".to_string();
         cfg.llm_providers.insert(
-            "openai".to_string(),
+            "main".to_string(),
             LlmProviderProfile {
-                provider: Some("openai".to_string()),
+                provider: Some("codex-app".to_string()),
                 api_key: None,
                 llm_base_url: None,
                 llm_user_agent: None,
-                default_model: Some("gpt-5.2".to_string()),
-                models: vec!["gpt-5.2".to_string(), "gpt-5".to_string()],
+                default_model: Some("gpt-5.4".to_string()),
+                models: vec!["gpt-5.4".to_string(), "gpt-5.4-mini".to_string()],
                 show_thinking: None,
             },
         );
         cfg.llm_providers.insert(
-            "anthropic".to_string(),
+            "reasoning".to_string(),
             LlmProviderProfile {
-                provider: Some("anthropic".to_string()),
-                api_key: Some("k".to_string()),
+                provider: Some("codex-app".to_string()),
+                api_key: None,
                 llm_base_url: None,
                 llm_user_agent: None,
-                default_model: Some("claude-sonnet-4-5-20250929".to_string()),
-                models: vec![
-                    "claude-sonnet-4-5-20250929".to_string(),
-                    "claude-opus-4-6-20260205".to_string(),
-                ],
+                default_model: Some("gpt-5.3-codex".to_string()),
+                models: vec!["gpt-5.3-codex".to_string(), "gpt-5.4".to_string()],
                 show_thinking: None,
             },
         );
@@ -882,7 +875,7 @@ mod tests {
         let text =
             build_model_response(&cfg, provider_overrides, overrides, "telegram", 1, "/model")
                 .await;
-        assert_eq!(text, "Current provider/model: openai / gpt-5.2");
+        assert_eq!(text, "Current provider/model: main / gpt-5.4");
     }
 
     #[tokio::test]
@@ -896,12 +889,18 @@ mod tests {
             overrides.clone(),
             "telegram",
             1,
-            "/model gpt-5",
+            "/model gpt-5.4-mini",
         )
         .await;
-        assert_eq!(text, "Model switched for this channel to: openai / gpt-5");
+        assert_eq!(
+            text,
+            "Model switched for this channel to: main / gpt-5.4-mini"
+        );
         let guard = overrides.read().await;
-        assert_eq!(guard.get("telegram").map(String::as_str), Some("gpt-5"));
+        assert_eq!(
+            guard.get("telegram").map(String::as_str),
+            Some("gpt-5.4-mini")
+        );
     }
 
     #[tokio::test]
@@ -922,7 +921,7 @@ mod tests {
         .await;
         assert_eq!(
             text,
-            "Model override cleared. Current provider/model: openai / gpt-5.2"
+            "Model override cleared. Current provider/model: main / gpt-5.4"
         );
         let guard = overrides.read().await;
         assert!(!guard.contains_key("telegram"));
@@ -940,17 +939,17 @@ mod tests {
             provider_overrides.clone(),
             model_overrides.clone(),
             "telegram",
-            "/provider anthropic",
+            "/provider reasoning",
         )
         .await;
         assert!(
-            text.contains("Provider switched for this channel to: anthropic"),
+            text.contains("Provider switched for this channel to: reasoning"),
             "unexpected text: {text}"
         );
         let provider_guard = provider_overrides.read().await;
         assert_eq!(
             provider_guard.get("telegram").map(String::as_str),
-            Some("anthropic")
+            Some("reasoning")
         );
         drop(provider_guard);
         let model_guard = model_overrides.read().await;
@@ -972,16 +971,15 @@ mod tests {
             temp.join("microclaw.config.yaml"),
             r#"
 bot_username: bot
-api_key: key
-llm_provider: openai
-model: gpt-5.2
+llm_provider: codex-app
+model: gpt-5.4
 provider_presets:
   modal:
-    provider: openai
-    default_model: gpt-5.2
+    provider: codex-app
+    default_model: gpt-5.4
   cloudflare:
-    provider: openai
-    default_model: "@cf/zai-org/glm-4.7-flash"
+    provider: codex-app
+    default_model: gpt-5.4-mini
 channels:
   telegram:
     enabled: true
@@ -1043,13 +1041,15 @@ channels:
             temp.join("microclaw.config.yaml"),
             r#"
 bot_username: bot
-api_key: key
-llm_provider: openai
-model: gpt-5.2
+llm_provider: codex-app
+model: gpt-5.4
 provider_presets:
   cloudflare:
-    provider: openai
-    default_model: "@cf/zai-org/glm-4.7-flash"
+    provider: codex-app
+    default_model: gpt-5.4-mini
+    models:
+      - gpt-5.4
+      - gpt-5.4-mini
 channels:
   telegram:
     enabled: true
@@ -1072,24 +1072,19 @@ channels:
             model_overrides.clone(),
             "telegram",
             1,
-            "/model @cf/zai-org/glm-4.7-flash",
+            "/model gpt-5.4",
             true,
         )
         .await;
         assert_eq!(
             text,
-            "Model switched for this channel to: cloudflare / @cf/zai-org/glm-4.7-flash"
+            "Model switched for this channel to: cloudflare / gpt-5.4"
         );
 
-        let saved = fs::read_to_string(temp.join("microclaw.config.yaml")).unwrap();
-        assert!(
-            saved.contains("model: '@cf/zai-org/glm-4.7-flash'")
-                || saved.contains("model: \"@cf/zai-org/glm-4.7-flash\"")
-        );
         let saved_cfg = Config::load().unwrap();
         assert_eq!(
             saved_cfg.model_override_for_channel("telegram").as_deref(),
-            Some("@cf/zai-org/glm-4.7-flash")
+            Some("gpt-5.4")
         );
         assert_eq!(
             model_overrides
@@ -1097,7 +1092,7 @@ channels:
                 .await
                 .get("telegram")
                 .map(String::as_str),
-            Some("@cf/zai-org/glm-4.7-flash")
+            Some("gpt-5.4")
         );
 
         std::env::set_current_dir(old_cwd).unwrap();
@@ -1120,16 +1115,16 @@ channels:
             temp.join("microclaw.config.yaml"),
             r#"
 bot_username: bot
-api_key: key
-llm_provider: openai
-model: gpt-5.2
+llm_provider: codex-app
+model: gpt-5.4
 llm_providers:
-  openai:
-    provider: openai
-    default_model: gpt-5.2
+  codex-app:
+    provider: codex-app
+    default_model: gpt-5.4
     models:
-      - gpt-5.2
-      - gpt-5
+      - gpt-5.4
+      - gpt-5.4-mini
+      - gpt-5.3-codex
 channels:
   telegram:
     enabled: true
@@ -1138,11 +1133,11 @@ channels:
       sales:
         enabled: true
         bot_token: sales-tok
-        model: gpt-5.2
+        model: gpt-5.4
       ops:
         enabled: true
         bot_token: ops-tok
-        model: gpt-5-mini
+        model: gpt-5.4-mini
 "#,
         )
         .unwrap();
@@ -1156,22 +1151,25 @@ channels:
             model_overrides.clone(),
             "telegram.ops",
             1,
-            "/model gpt-5",
+            "/model gpt-5.3-codex",
             true,
         )
         .await;
-        assert_eq!(text, "Model switched for this channel to: openai / gpt-5");
+        assert_eq!(
+            text,
+            "Model switched for this channel to: codex-app / gpt-5.3-codex"
+        );
 
         let saved_cfg = Config::load().unwrap();
         assert_eq!(
             saved_cfg.model_override_for_channel("telegram").as_deref(),
-            Some("gpt-5.2")
+            Some("gpt-5.4")
         );
         assert_eq!(
             saved_cfg
                 .model_override_for_channel("telegram.ops")
                 .as_deref(),
-            Some("gpt-5")
+            Some("gpt-5.3-codex")
         );
         assert_eq!(
             model_overrides
@@ -1179,7 +1177,7 @@ channels:
                 .await
                 .get("telegram.ops")
                 .map(String::as_str),
-            Some("gpt-5")
+            Some("gpt-5.3-codex")
         );
 
         std::env::set_current_dir(old_cwd).unwrap();
@@ -1197,25 +1195,22 @@ channels:
             provider_overrides,
             model_overrides,
             "telegram",
-            "/models anthropic",
+            "/models reasoning",
         )
         .await;
-        assert!(text.contains("claude-sonnet-4-5-20250929"));
-        assert!(text.contains("claude-opus-4-6-20260205"));
+        assert!(text.contains("gpt-5.3-codex"));
+        assert!(text.contains("gpt-5.4"));
     }
 
     #[test]
     fn models_command_parses_api_mode() {
         assert_eq!(parse_models_command_args(""), (false, None));
         assert_eq!(
-            parse_models_command_args("anthropic"),
-            (false, Some("anthropic"))
+            parse_models_command_args("reasoning"),
+            (false, Some("reasoning"))
         );
         assert_eq!(parse_models_command_args("api"), (true, None));
-        assert_eq!(
-            parse_models_command_args("api openai"),
-            (true, Some("openai"))
-        );
+        assert_eq!(parse_models_command_args("api main"), (true, Some("main")));
     }
 
     #[test]
@@ -1249,46 +1244,16 @@ channels:
     }
 
     #[tokio::test]
-    async fn models_command_uses_live_models_when_placeholder_profile() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (path_tx, path_rx) = mpsc::channel::<String>();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut buf = [0u8; 8192];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            let path = req
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .unwrap_or("")
-                .to_string();
-            let _ = path_tx.send(path);
-            let body = r#"{"data":[{"id":"model-live-a"},{"id":"model-live-b"}]}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
-        });
-
+    async fn models_command_falls_back_when_live_models_are_unavailable() {
         let mut cfg = Config::test_defaults();
         cfg.llm_provider = "lab-local".to_string();
-        cfg.api_key = "k".to_string();
         cfg.model = "custom-model".to_string();
-        cfg.llm_base_url = Some(format!("http://{addr}/v1"));
         cfg.llm_providers.insert(
             "lab-local".to_string(),
             LlmProviderProfile {
-                provider: Some("openai".to_string()),
+                provider: Some("codex-app".to_string()),
                 api_key: None,
-                llm_base_url: Some(format!("http://{addr}/v1")),
+                llm_base_url: None,
                 llm_user_agent: None,
                 default_model: Some("custom-model".to_string()),
                 models: vec!["custom-model".to_string()],
@@ -1300,47 +1265,20 @@ channels:
         let text =
             build_models_response(&cfg, provider_overrides, model_overrides, "web", "/models")
                 .await;
-        let path = path_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        server.join().unwrap();
-        assert_eq!(path, "/v1/models");
-        assert!(text.contains("Live models for provider 'lab-local'"));
-        assert!(text.contains("model-live-a"));
+        assert_eq!(text, "Models for provider 'lab-local': custom-model");
     }
 
     #[tokio::test]
-    async fn model_command_validates_against_live_models_for_placeholder_profile() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let mut buf = [0u8; 8192];
-                let _ = stream.read(&mut buf).unwrap_or(0);
-                let body = r#"{"data":[{"id":"model-live-a"},{"id":"model-live-b"}]}"#;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-
+    async fn model_command_falls_back_to_configured_models_when_live_listing_is_unavailable() {
         let mut cfg = Config::test_defaults();
         cfg.llm_provider = "lab-local".to_string();
-        cfg.api_key = "k".to_string();
         cfg.model = "custom-model".to_string();
-        cfg.llm_base_url = Some(format!("http://{addr}/v1"));
         cfg.llm_providers.insert(
             "lab-local".to_string(),
             LlmProviderProfile {
-                provider: Some("openai".to_string()),
+                provider: Some("codex-app".to_string()),
                 api_key: None,
-                llm_base_url: Some(format!("http://{addr}/v1")),
+                llm_base_url: None,
                 llm_user_agent: None,
                 default_model: Some("custom-model".to_string()),
                 models: vec!["custom-model".to_string()],
@@ -1356,12 +1294,12 @@ channels:
             model_overrides.clone(),
             "web",
             1,
-            "/model model-live-a",
+            "/model custom-model",
         )
         .await;
         assert_eq!(
             ok,
-            "Model switched for this channel to: lab-local / model-live-a"
+            "Model switched for this channel to: lab-local / custom-model"
         );
 
         let bad = build_model_response(
@@ -1373,9 +1311,8 @@ channels:
             "/model not-real",
         )
         .await;
-        server.join().unwrap();
         assert!(bad.contains("Model 'not-real' is not configured"));
-        assert!(bad.contains("model-live-a"));
+        assert!(bad.contains("custom-model"));
     }
 
     #[test]

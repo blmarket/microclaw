@@ -181,6 +181,56 @@ pub fn resolve_openai_codex_auth(
     )))
 }
 
+pub fn resolve_codex_chatgpt_auth_tokens() -> Result<CodexAuthResolved, MicroClawError> {
+    if let Ok(token) = std::env::var("OPENAI_CODEX_ACCESS_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Ok(CodexAuthResolved {
+                bearer_token: trimmed.to_string(),
+                account_id: None,
+            });
+        }
+    }
+
+    let auth_path = default_codex_auth_path();
+    if auth_path.exists() {
+        let content = std::fs::read_to_string(&auth_path).map_err(|e| {
+            MicroClawError::Config(format!(
+                "Failed to read Codex auth file {}: {e}",
+                auth_path.display()
+            ))
+        })?;
+        let parsed: CodexAuthFile = serde_json::from_str(&content).map_err(|e| {
+            MicroClawError::Config(format!(
+                "Failed to parse Codex auth file {}: {e}",
+                auth_path.display()
+            ))
+        })?;
+        if let Some(token) = parsed
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.access_token.as_ref())
+            .map(|token| token.trim())
+            .filter(|token| !token.is_empty())
+        {
+            return Ok(CodexAuthResolved {
+                bearer_token: token.to_string(),
+                account_id: parsed
+                    .tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.account_id.clone())
+                    .map(|id| id.trim().to_string())
+                    .filter(|id| !id.is_empty()),
+            });
+        }
+    }
+
+    Err(MicroClawError::Config(format!(
+        "codex-app requires ~/.codex/auth.json with tokens.access_token, or OPENAI_CODEX_ACCESS_TOKEN, to satisfy app-server auth refresh requests. Run `codex login` or update Codex config files (expected auth file: {}).",
+        auth_path.display()
+    )))
+}
+
 pub fn qwen_oauth_file_has_access_token() -> Result<bool, MicroClawError> {
     if let Ok(token) = std::env::var("QWEN_PORTAL_ACCESS_TOKEN") {
         if !token.trim().is_empty() {
@@ -612,6 +662,47 @@ mod tests {
 
         assert_eq!(auth.bearer_token, "sk-user-stale");
         assert!(auth.account_id.is_none());
+    }
+
+    #[test]
+    fn test_resolve_codex_chatgpt_auth_tokens_reads_auth_file() {
+        let _guard = env_lock();
+        let prev_codex_home = std::env::var("CODEX_HOME").ok();
+        let prev_access = std::env::var("OPENAI_CODEX_ACCESS_TOKEN").ok();
+        std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
+
+        let auth_dir = std::env::temp_dir().join(format!(
+            "microclaw-codex-chatgpt-auth-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        std::fs::write(
+            auth_dir.join("auth.json"),
+            r#"{"tokens":{"access_token":"chatgpt-token","account_id":"acct-123"}}"#,
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &auth_dir);
+
+        let auth = resolve_codex_chatgpt_auth_tokens().unwrap();
+
+        if let Some(prev) = prev_codex_home {
+            std::env::set_var("CODEX_HOME", prev);
+        } else {
+            std::env::remove_var("CODEX_HOME");
+        }
+        if let Some(prev) = prev_access {
+            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev);
+        } else {
+            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
+        }
+        let _ = std::fs::remove_file(auth_dir.join("auth.json"));
+        let _ = std::fs::remove_dir(auth_dir);
+
+        assert_eq!(auth.bearer_token, "chatgpt-token");
+        assert_eq!(auth.account_id.as_deref(), Some("acct-123"));
     }
 
     #[test]

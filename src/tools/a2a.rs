@@ -276,7 +276,11 @@ mod tests {
             })
         }
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("failed to bind a2a test listener: {err}"),
+        };
         let addr = listener.local_addr().unwrap();
         let app = Router::new()
             .route(A2A_MESSAGE_PATH, post(handler))

@@ -2071,10 +2071,6 @@ fn merge_provider_profile(
 mod tests {
     use super::*;
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::test_support::env_lock()
-    }
-
     #[test]
     fn test_clawhub_config_defaults() {
         let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\n";
@@ -2143,7 +2139,7 @@ voice_transcription_command: "whisper-mlx --file {file}"
         config.timezone = "US/Eastern".into();
         config.allowed_groups = vec![123, 456];
         config.control_chat_ids = vec![999];
-        assert_eq!(config.model, "claude-sonnet-4-5-20250929");
+        assert_eq!(config.model, "gpt-5.4");
         assert!(config.data_dir.ends_with(".microclaw"));
         assert!(std::path::PathBuf::from(&config.working_dir)
             .ends_with(std::path::Path::new(".microclaw").join("working_dir")));
@@ -2160,14 +2156,14 @@ voice_transcription_command: "whisper-mlx --file {file}"
         let parsed: Config = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.telegram_bot_token, "tok");
         assert_eq!(parsed.max_tokens, 8192);
-        assert_eq!(parsed.llm_provider, "anthropic");
+        assert_eq!(parsed.llm_provider, "codex-app");
     }
 
     #[test]
     fn test_config_yaml_defaults() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\n";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.llm_provider, "anthropic");
+        assert_eq!(config.llm_provider, "codex-app");
         assert_eq!(config.max_tokens, 8192);
         assert_eq!(config.max_tool_iterations, 100);
         assert!(config.data_dir.ends_with(".microclaw"));
@@ -2246,7 +2242,6 @@ voice_transcription_command: "whisper-mlx --file {file}"
         let yaml = r#"
 telegram_bot_token: tok
 bot_username: bot
-api_key: key
 provider_presets:
   lab:
     provider: OPENAI
@@ -2265,12 +2260,9 @@ llm_providers:
         config.post_deserialize().unwrap();
 
         let profile = config.resolve_llm_provider_profile("lab").unwrap();
-        assert_eq!(profile.provider, "openai");
-        assert_eq!(profile.api_key, "legacy-key");
-        assert_eq!(
-            profile.llm_base_url.as_deref(),
-            Some("https://preset.example/v1")
-        );
+        assert_eq!(profile.provider, "codex-app");
+        assert!(profile.api_key.is_empty());
+        assert!(profile.llm_base_url.is_none());
         assert_eq!(profile.llm_user_agent, "preset-agent");
         assert_eq!(profile.default_model, "preset-model");
         assert_eq!(
@@ -2340,7 +2332,6 @@ discord:
         let yaml = r#"
 telegram_bot_token: tok
 bot_username: bot
-api_key: key
 provider_presets:
   googlegemini:
     provider: google
@@ -2418,7 +2409,7 @@ channels:
 
     #[test]
     fn test_post_deserialize_empty_working_dir_uses_default() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nworking_dir: '  '\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nworking_dir: '  '\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         assert!(std::path::PathBuf::from(&config.working_dir)
@@ -2427,8 +2418,7 @@ channels:
 
     #[test]
     fn test_post_deserialize_zero_memory_budget_uses_default() {
-        let yaml =
-            "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nmemory_token_budget: 0\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nmemory_token_budget: 0\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         assert_eq!(config.memory_token_budget, 1500);
@@ -2490,12 +2480,11 @@ channels:
 
     #[test]
     fn test_config_post_deserialize() {
-        let yaml =
-            "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_provider: ANTHROPIC\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: CODEX-APP\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
-        assert_eq!(config.llm_provider, "anthropic");
-        assert_eq!(config.model, "claude-sonnet-4-5-20250929");
+        assert_eq!(config.llm_provider, "codex-app");
+        assert_eq!(config.model, "gpt-5.4");
     }
 
     #[test]
@@ -2532,7 +2521,7 @@ channels:
 
     #[test]
     fn test_post_deserialize_invalid_timezone() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\noverride_timezone: Mars/Olympus\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\noverride_timezone: Mars/Olympus\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         let err = config.post_deserialize().unwrap_err();
         let msg = err.to_string();
@@ -2541,62 +2530,19 @@ channels:
 
     #[test]
     fn test_post_deserialize_auto_timezone_resolves_to_valid_tz() {
-        let yaml =
-            "telegram_bot_token: tok\nbot_username: bot\napi_key: key\noverride_timezone: auto\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\noverride_timezone: auto\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         assert!(config.timezone.parse::<chrono_tz::Tz>().is_ok());
     }
 
     #[test]
-    fn test_post_deserialize_missing_api_key() {
+    fn test_post_deserialize_minimal_codex_app_config_succeeds() {
         let yaml = "telegram_bot_token: tok\nbot_username: bot\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        let err = config.post_deserialize().unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("api_key is required"));
-    }
-
-    #[test]
-    fn test_post_deserialize_openai_codex_allows_empty_api_key() {
-        let _guard = env_lock();
-        let prev_codex_home = std::env::var("CODEX_HOME").ok();
-        let prev_access = std::env::var("OPENAI_CODEX_ACCESS_TOKEN").ok();
-        std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
-
-        let auth_dir = std::env::temp_dir().join(format!(
-            "microclaw-codex-auth-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&auth_dir).unwrap();
-        std::fs::write(
-            auth_dir.join("auth.json"),
-            r#"{"tokens":{"access_token":"tok"}}"#,
-        )
-        .unwrap();
-        std::env::set_var("CODEX_HOME", &auth_dir);
-
-        let yaml =
-            "telegram_bot_token: tok\nbot_username: bot\nllm_provider: openai-codex\nmodel: gpt-5.3-codex\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
-
-        if let Some(prev) = prev_codex_home {
-            std::env::set_var("CODEX_HOME", prev);
-        } else {
-            std::env::remove_var("CODEX_HOME");
-        }
-        if let Some(prev) = prev_access {
-            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev);
-        } else {
-            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
-        }
-        let _ = std::fs::remove_file(auth_dir.join("auth.json"));
-        let _ = std::fs::remove_dir(auth_dir);
-        assert_eq!(config.llm_provider, "openai-codex");
+        assert_eq!(config.llm_provider, "codex-app");
+        assert_eq!(config.model, "gpt-5.4");
     }
 
     #[test]
@@ -2610,7 +2556,7 @@ channels:
 
     #[test]
     fn test_post_deserialize_discord_only() {
-        let yaml = "bot_username: bot\napi_key: key\ndiscord_bot_token: discord_tok\n";
+        let yaml = "bot_username: bot\ndiscord_bot_token: discord_tok\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         // Should succeed: discord_bot_token is set even though telegram_bot_token is empty
         config.post_deserialize().unwrap();
@@ -2619,7 +2565,6 @@ channels:
     #[test]
     fn test_post_deserialize_irc_only() {
         let yaml = r##"
-api_key: key
 channels:
   irc:
     enabled: true
@@ -2635,7 +2580,6 @@ channels:
     #[test]
     fn test_post_deserialize_matrix_only() {
         let yaml = r##"
-api_key: key
 channels:
   matrix:
     enabled: true
@@ -2650,7 +2594,7 @@ channels:
 
     #[test]
     fn test_post_deserialize_channel_enabled_flag_overrides_legacy_inference() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\ndiscord_bot_token: discord_tok\napi_key: key\nchannels:\n  telegram:\n    enabled: false\n  discord:\n    enabled: true\n  web:\n    enabled: false\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\ndiscord_bot_token: discord_tok\nchannels:\n  telegram:\n    enabled: false\n  discord:\n    enabled: true\n  web:\n    enabled: false\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
 
@@ -2661,21 +2605,11 @@ channels:
 
     #[test]
     fn test_post_deserialize_channel_enabled_flag_controls_web() {
-        let yaml =
-            "api_key: key\ndiscord_bot_token: discord_tok\nchannels:\n  web:\n    enabled: false\n";
+        let yaml = "discord_bot_token: discord_tok\nchannels:\n  web:\n    enabled: false\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
 
         assert!(!config.channel_enabled("web"));
-    }
-
-    #[test]
-    fn test_post_deserialize_openai_default_model() {
-        let yaml =
-            "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_provider: openai\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        config.post_deserialize().unwrap();
-        assert_eq!(config.model, "gpt-5.2");
     }
 
     #[test]
@@ -2706,237 +2640,8 @@ channels:
     }
 
     #[test]
-    fn test_post_deserialize_openai_codex_default_model() {
-        let _guard = env_lock();
-        let prev_codex_home = std::env::var("CODEX_HOME").ok();
-        let prev_access = std::env::var("OPENAI_CODEX_ACCESS_TOKEN").ok();
-        std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
-
-        let auth_dir = std::env::temp_dir().join(format!(
-            "microclaw-codex-auth-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&auth_dir).unwrap();
-        std::fs::write(
-            auth_dir.join("auth.json"),
-            r#"{"tokens":{"access_token":"tok"}}"#,
-        )
-        .unwrap();
-        std::env::set_var("CODEX_HOME", &auth_dir);
-
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: openai-codex\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        config.post_deserialize().unwrap();
-
-        if let Some(prev) = prev_codex_home {
-            std::env::set_var("CODEX_HOME", prev);
-        } else {
-            std::env::remove_var("CODEX_HOME");
-        }
-        if let Some(prev) = prev_access {
-            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev);
-        } else {
-            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
-        }
-        let _ = std::fs::remove_file(auth_dir.join("auth.json"));
-        let _ = std::fs::remove_dir(auth_dir);
-        assert_eq!(config.model, "gpt-5.3-codex");
-    }
-
-    #[test]
-    fn test_post_deserialize_openai_codex_missing_oauth_token() {
-        let _guard = env_lock();
-        let prev_codex_home = std::env::var("CODEX_HOME").ok();
-        let prev_access = std::env::var("OPENAI_CODEX_ACCESS_TOKEN").ok();
-        std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
-
-        let auth_dir = std::env::temp_dir().join(format!(
-            "microclaw-codex-auth-missing-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&auth_dir).unwrap();
-        std::env::set_var("CODEX_HOME", &auth_dir);
-
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: openai-codex\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        let err = config.post_deserialize().unwrap_err();
-        let msg = err.to_string();
-
-        if let Some(prev) = prev_codex_home {
-            std::env::set_var("CODEX_HOME", prev);
-        } else {
-            std::env::remove_var("CODEX_HOME");
-        }
-        if let Some(prev) = prev_access {
-            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev);
-        } else {
-            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
-        }
-        let _ = std::fs::remove_dir(auth_dir);
-
-        assert!(msg.contains("openai-codex requires ~/.codex/auth.json"));
-    }
-
-    #[test]
-    fn test_post_deserialize_openai_codex_rejects_plain_api_key_without_oauth() {
-        let _guard = env_lock();
-        let prev_codex_home = std::env::var("CODEX_HOME").ok();
-        let prev_access = std::env::var("OPENAI_CODEX_ACCESS_TOKEN").ok();
-        std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
-
-        let auth_dir = std::env::temp_dir().join(format!(
-            "microclaw-codex-auth-plain-key-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&auth_dir).unwrap();
-        std::env::set_var("CODEX_HOME", &auth_dir);
-
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: openai-codex\napi_key: sk-user-stale\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        let err = config.post_deserialize().unwrap_err();
-        let msg = err.to_string();
-
-        if let Some(prev) = prev_codex_home {
-            std::env::set_var("CODEX_HOME", prev);
-        } else {
-            std::env::remove_var("CODEX_HOME");
-        }
-        if let Some(prev) = prev_access {
-            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev);
-        } else {
-            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
-        }
-        let _ = std::fs::remove_dir(auth_dir);
-
-        assert!(msg.contains("ignores microclaw.config.yaml api_key"));
-    }
-
-    #[test]
-    fn test_post_deserialize_openai_codex_allows_env_access_token() {
-        let _guard = env_lock();
-        let prev_codex_home = std::env::var("CODEX_HOME").ok();
-        let prev_access = std::env::var("OPENAI_CODEX_ACCESS_TOKEN").ok();
-        std::env::remove_var("CODEX_HOME");
-        std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", "env-token");
-
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: openai-codex\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        config.post_deserialize().unwrap();
-
-        if let Some(prev) = prev_codex_home {
-            std::env::set_var("CODEX_HOME", prev);
-        } else {
-            std::env::remove_var("CODEX_HOME");
-        }
-        if let Some(prev) = prev_access {
-            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev);
-        } else {
-            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
-        }
-
-        assert_eq!(config.llm_provider, "openai-codex");
-    }
-
-    #[test]
-    fn test_post_deserialize_qwen_code_allows_oauth_without_api_key() {
-        let _guard = env_lock();
-        let prev_qwen_home = std::env::var("QWEN_HOME").ok();
-        let prev_qwen_access = std::env::var("QWEN_PORTAL_ACCESS_TOKEN").ok();
-        std::env::remove_var("QWEN_PORTAL_ACCESS_TOKEN");
-
-        let qwen_dir = std::env::temp_dir().join(format!(
-            "microclaw-qwen-auth-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&qwen_dir).unwrap();
-        std::fs::write(
-            qwen_dir.join("oauth_creds.json"),
-            r#"{"access_token":"qwen-oauth-token"}"#,
-        )
-        .unwrap();
-        std::env::set_var("QWEN_HOME", &qwen_dir);
-
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: qwen-portal\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        config.post_deserialize().unwrap();
-
-        if let Some(prev) = prev_qwen_home {
-            std::env::set_var("QWEN_HOME", prev);
-        } else {
-            std::env::remove_var("QWEN_HOME");
-        }
-        if let Some(prev) = prev_qwen_access {
-            std::env::set_var("QWEN_PORTAL_ACCESS_TOKEN", prev);
-        } else {
-            std::env::remove_var("QWEN_PORTAL_ACCESS_TOKEN");
-        }
-        let _ = std::fs::remove_file(qwen_dir.join("oauth_creds.json"));
-        let _ = std::fs::remove_dir(qwen_dir);
-
-        assert_eq!(config.llm_provider, "qwen-portal");
-    }
-
-    #[test]
-    fn test_post_deserialize_qwen_code_missing_oauth_and_api_key() {
-        let _guard = env_lock();
-        let prev_qwen_home = std::env::var("QWEN_HOME").ok();
-        let prev_qwen_access = std::env::var("QWEN_PORTAL_ACCESS_TOKEN").ok();
-        std::env::remove_var("QWEN_PORTAL_ACCESS_TOKEN");
-
-        let qwen_dir = std::env::temp_dir().join(format!(
-            "microclaw-qwen-auth-missing-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&qwen_dir).unwrap();
-        std::env::set_var("QWEN_HOME", &qwen_dir);
-
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: qwen-portal\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        let err = config.post_deserialize().unwrap_err();
-
-        if let Some(prev) = prev_qwen_home {
-            std::env::set_var("QWEN_HOME", prev);
-        } else {
-            std::env::remove_var("QWEN_HOME");
-        }
-        if let Some(prev) = prev_qwen_access {
-            std::env::set_var("QWEN_PORTAL_ACCESS_TOKEN", prev);
-        } else {
-            std::env::remove_var("QWEN_PORTAL_ACCESS_TOKEN");
-        }
-        let _ = std::fs::remove_dir(qwen_dir);
-
-        assert!(err
-            .to_string()
-            .contains("qwen-portal requires api_key, or ~/.qwen/oauth_creds.json"));
-    }
-
-    #[test]
-    fn test_post_deserialize_ollama_default_model_and_empty_key() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: ollama\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        config.post_deserialize().unwrap();
-        assert_eq!(config.model, "llama3.2");
-    }
-
-    #[test]
     fn test_post_deserialize_empty_base_url_becomes_none() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_base_url: '  '\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_base_url: '  '\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         assert!(config.llm_base_url.is_none());
@@ -2944,8 +2649,7 @@ channels:
 
     #[test]
     fn test_post_deserialize_empty_llm_user_agent_uses_default() {
-        let yaml =
-            "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_user_agent: '  '\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_user_agent: '  '\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         assert_eq!(
@@ -2956,11 +2660,11 @@ channels:
 
     #[test]
     fn test_post_deserialize_provider_case_insensitive() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_provider: '  ANTHROPIC  '\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: '  CODEX-APP  '\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
-        assert_eq!(config.llm_provider, "anthropic");
-        assert_eq!(config.model, "claude-sonnet-4-5-20250929");
+        assert_eq!(config.llm_provider, "codex-app");
+        assert_eq!(config.model, "gpt-5.4");
     }
 
     #[test]
@@ -2968,7 +2672,6 @@ channels:
         let yaml = r#"
 telegram_bot_token: tok
 bot_username: bot
-api_key: key
 openai_compat_body_overrides:
   " temperature ": 0.2
   "  ": 1
@@ -3020,7 +2723,6 @@ openai_compat_body_overrides_by_model:
         let yaml = r#"
 telegram_bot_token: tok
 bot_username: bot
-api_key: key
 subagents:
   acp:
     enabled: true
@@ -3123,14 +2825,15 @@ subagents:
 
     #[test]
     fn test_post_deserialize_web_non_local_no_token_required() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nweb_enabled: true\nweb_host: 0.0.0.0\n";
+        let yaml =
+            "telegram_bot_token: tok\nbot_username: bot\nweb_enabled: true\nweb_host: 0.0.0.0\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
     }
 
     #[test]
     fn test_post_deserialize_web_channel_auth_token_is_removed() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nweb_enabled: true\nweb_host: 0.0.0.0\nchannels:\n  web:\n    enabled: true\n    auth_token: token123\n";
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nweb_enabled: true\nweb_host: 0.0.0.0\nchannels:\n  web:\n    enabled: true\n    auth_token: token123\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         let has_auth_token = config
@@ -3182,7 +2885,6 @@ subagents:
         let yaml = r#"
 telegram_bot_token: tok
 bot_username: bot
-api_key: key
 model_prices:
   - model: claude-sonnet-4-5-20250929
     input_per_million_usd: 3.0
@@ -3219,7 +2921,6 @@ model_prices:
         let yaml = r#"
 telegram_bot_token: tok
 bot_username: bot
-api_key: key
 openai_api_key: sk-test
 override_timezone: US/Eastern
 allowed_groups: [123, 456]
