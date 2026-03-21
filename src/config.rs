@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::codex_auth::{
-    codex_auth_file_has_access_token, is_openai_codex_provider, is_qwen_portal_provider,
-    provider_allows_empty_api_key, qwen_oauth_file_has_access_token,
+    codex_auth_file_has_access_token, is_codex_app_server_provider, is_openai_codex_provider,
+    is_qwen_portal_provider, provider_allows_empty_api_key, qwen_oauth_file_has_access_token,
 };
 use crate::plugins::PluginsConfig;
 use microclaw_core::error::MicroClawError;
@@ -1338,6 +1338,8 @@ impl Config {
         if self.model.is_empty() {
             self.model = match self.llm_provider.as_str() {
                 "anthropic" => "claude-sonnet-4-5-20250929".into(),
+                "codex-app" => "gpt-5.4".into(),
+                "codex-app-server" => "gpt-5.4".into(),
                 "ollama" => "llama3.2".into(),
                 "openai-codex" => "gpt-5.3-codex".into(),
                 _ => "gpt-5.2".into(),
@@ -1773,6 +1775,23 @@ Use operator password + API keys for Web auth."
             if !has_codex_auth {
                 return Err(MicroClawError::Config(
                     "openai-codex requires ~/.codex/auth.json (access token or OPENAI_API_KEY), or OPENAI_CODEX_ACCESS_TOKEN. Run `codex login` or update Codex config files.".into(),
+                ));
+            }
+        }
+        if is_codex_app_server_provider(&self.llm_provider) {
+            if !self.api_key.trim().is_empty() {
+                return Err(MicroClawError::Config(
+                    "codex-app-server ignores microclaw.config.yaml api_key. Configure Codex via `codex login` or ~/.codex/config.toml instead.".into(),
+                ));
+            }
+            if self
+                .llm_base_url
+                .as_ref()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+            {
+                return Err(MicroClawError::Config(
+                    "codex-app-server ignores microclaw.config.yaml llm_base_url. It launches the local `codex app-server` binary and uses Codex CLI config instead.".into(),
                 ));
             }
         }
@@ -2701,6 +2720,40 @@ channels:
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         assert_eq!(config.model, "gpt-5.2");
+    }
+
+    #[test]
+    fn test_post_deserialize_codex_app_server_default_model() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: codex-app-server\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+        assert_eq!(config.model, "gpt-5.4");
+    }
+
+    #[test]
+    fn test_post_deserialize_codex_app_default_model() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: codex-app\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+        assert_eq!(config.model, "gpt-5.4");
+    }
+
+    #[test]
+    fn test_post_deserialize_codex_app_server_rejects_api_key() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: codex-app-server\napi_key: sk-stale\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.post_deserialize().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("codex-app-server ignores microclaw.config.yaml api_key"));
+    }
+
+    #[test]
+    fn test_post_deserialize_codex_app_rejects_api_key() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: codex-app\napi_key: sk-stale\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.post_deserialize().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("codex-app-server ignores microclaw.config.yaml api_key"));
     }
 
     #[test]

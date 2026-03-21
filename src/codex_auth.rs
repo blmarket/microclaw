@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use microclaw_core::error::MicroClawError;
 
 pub const OPENAI_CODEX_PROVIDER: &str = "openai-codex";
+pub const CODEX_APP_PROVIDER: &str = "codex-app";
+pub const CODEX_APP_SERVER_PROVIDER: &str = "codex-app-server";
 pub const QWEN_PORTAL_PROVIDER: &str = "qwen-portal";
 
 #[derive(Debug, Deserialize)]
@@ -36,11 +38,17 @@ pub struct CodexAuthResolved {
 pub fn provider_allows_empty_api_key(provider: &str) -> bool {
     provider.eq_ignore_ascii_case("ollama")
         || provider.eq_ignore_ascii_case(OPENAI_CODEX_PROVIDER)
+        || is_codex_app_server_provider(provider)
         || provider.eq_ignore_ascii_case(QWEN_PORTAL_PROVIDER)
 }
 
 pub fn is_openai_codex_provider(provider: &str) -> bool {
     provider.eq_ignore_ascii_case(OPENAI_CODEX_PROVIDER)
+}
+
+pub fn is_codex_app_server_provider(provider: &str) -> bool {
+    provider.eq_ignore_ascii_case(CODEX_APP_PROVIDER)
+        || provider.eq_ignore_ascii_case(CODEX_APP_SERVER_PROVIDER)
 }
 
 pub fn is_qwen_portal_provider(provider: &str) -> bool {
@@ -485,6 +493,8 @@ mod tests {
     fn test_provider_allows_empty_api_key() {
         assert!(provider_allows_empty_api_key("ollama"));
         assert!(provider_allows_empty_api_key("openai-codex"));
+        assert!(provider_allows_empty_api_key("codex-app"));
+        assert!(provider_allows_empty_api_key("codex-app-server"));
         assert!(provider_allows_empty_api_key("qwen-portal"));
         assert!(!provider_allows_empty_api_key("openai"));
     }
@@ -494,6 +504,15 @@ mod tests {
         assert!(is_openai_codex_provider("openai-codex"));
         assert!(is_openai_codex_provider("OPENAI-CODEX"));
         assert!(!is_openai_codex_provider("openai"));
+    }
+
+    #[test]
+    fn test_is_codex_app_server_provider() {
+        assert!(is_codex_app_server_provider("codex-app"));
+        assert!(is_codex_app_server_provider("CODEX-APP"));
+        assert!(is_codex_app_server_provider("codex-app-server"));
+        assert!(is_codex_app_server_provider("CODEX-APP-SERVER"));
+        assert!(!is_codex_app_server_provider("openai-codex"));
     }
 
     #[test]
