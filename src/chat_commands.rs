@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use crate::agent_engine::archive_conversation;
 use crate::config::{Config, ResolvedLlmProviderProfile};
-use crate::http_client::llm_user_agent;
 use crate::run_control;
 use crate::runtime::AppState;
 use microclaw_core::llm_types::Message;
 use microclaw_storage::db::{call_blocking, Database};
 use microclaw_storage::usage::build_usage_report;
 use microclaw_tools::todo_store::clear_todos;
+#[cfg(test)]
 use serde::Deserialize;
 use tracing::warn;
 
@@ -671,21 +671,25 @@ fn parse_models_command_args(requested: &str) -> (bool, Option<&str>) {
     (false, parts.first().copied())
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct OpenAiModelsApiResponse {
     data: Vec<OpenAiModelItem>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct OpenAiModelItem {
     id: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AnthropicModelsApiResponse {
     data: Vec<AnthropicModelItem>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AnthropicModelItem {
     id: String,
@@ -693,6 +697,7 @@ struct AnthropicModelItem {
     display_name: Option<String>,
 }
 
+#[cfg(test)]
 fn resolve_openai_models_url(profile: &ResolvedLlmProviderProfile) -> String {
     let backend = profile.provider.trim().to_ascii_lowercase();
     let default_base = match backend.as_str() {
@@ -722,6 +727,8 @@ fn resolve_openai_models_url(profile: &ResolvedLlmProviderProfile) -> String {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn resolve_anthropic_models_url(profile: &ResolvedLlmProviderProfile) -> String {
     let configured = profile
         .llm_base_url
@@ -745,67 +752,18 @@ fn resolve_anthropic_models_url(profile: &ResolvedLlmProviderProfile) -> String 
 async fn fetch_models_from_provider_api(
     profile: &ResolvedLlmProviderProfile,
 ) -> Result<Vec<String>, String> {
-    let backend = profile.provider.trim().to_ascii_lowercase();
-    if backend == "openai-codex" && profile.api_key.trim().is_empty() {
-        return Err(
-            "openai-codex API listing requires provider api_key in llm_providers.<name>.api_key"
-                .to_string(),
-        );
-    }
-    if backend == "anthropic" {
-        if profile.api_key.trim().is_empty() {
-            return Err("missing api_key for anthropic profile".to_string());
-        }
-        let url = resolve_anthropic_models_url(profile);
-        let client = reqwest::Client::builder()
-            .user_agent(llm_user_agent(&profile.llm_user_agent))
-            .build()
-            .map_err(|e| e.to_string())?;
-        let response = client
-            .get(&url)
-            .header("x-api-key", profile.api_key.as_str())
-            .header("anthropic-version", "2023-06-01")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        let status = response.status();
-        let body = response.text().await.map_err(|e| e.to_string())?;
-        if !status.is_success() {
-            return Err(format!("HTTP {status}: {body}"));
-        }
-        let mut out = parse_anthropic_models_json_ids(&body)?;
-        out.sort();
-        out.dedup();
-        return Ok(out);
-    }
-
-    let url = resolve_openai_models_url(profile);
-    let client = reqwest::Client::builder()
-        .user_agent(llm_user_agent(&profile.llm_user_agent))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let mut request = client.get(&url);
-    if !profile.api_key.trim().is_empty() {
-        request = request.bearer_auth(profile.api_key.as_str());
-    }
-    let response = request.send().await.map_err(|e| e.to_string())?;
-    let status = response.status();
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(format!("HTTP {status}: {body}"));
-    }
-    let mut out = parse_openai_models_json_ids(&body)?;
-    out.sort();
-    out.dedup();
-    Ok(out)
+    let _ = profile;
+    Err("Live model listing is unavailable for codex-app. Configure allowed models in provider_presets.<id>.models instead.".to_string())
 }
 
+#[cfg(test)]
 fn parse_openai_models_json_ids(body: &str) -> Result<Vec<String>, String> {
     let parsed: OpenAiModelsApiResponse =
         serde_json::from_str(body).map_err(|e| format!("Invalid JSON response: {e}"))?;
     Ok(parsed.data.into_iter().map(|m| m.id).collect())
 }
 
+#[cfg(test)]
 fn parse_anthropic_models_json_ids(body: &str) -> Result<Vec<String>, String> {
     let parsed: AnthropicModelsApiResponse =
         serde_json::from_str(body).map_err(|e| format!("Invalid JSON response: {e}"))?;

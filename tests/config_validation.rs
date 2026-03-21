@@ -7,8 +7,8 @@ fn minimal_config() -> Config {
     Config {
         telegram_bot_token: "tok".into(),
         bot_username: "testbot".into(),
-        llm_provider: "anthropic".into(),
-        api_key: "test-key".into(),
+        llm_provider: "codex-app".into(),
+        api_key: String::new(),
         model: String::new(),
         provider_presets: std::collections::HashMap::new(),
         llm_providers: std::collections::HashMap::new(),
@@ -85,7 +85,7 @@ fn test_yaml_parse_minimal() {
     assert_eq!(config.bot_username, "bot");
     assert_eq!(config.api_key, "key");
     // Defaults
-    assert_eq!(config.llm_provider, "anthropic");
+    assert_eq!(config.llm_provider, "codex-app");
     assert_eq!(config.max_tokens, 8192);
     assert_eq!(config.max_tool_iterations, 100);
     assert_eq!(config.max_document_size_mb, 100);
@@ -111,10 +111,8 @@ fn test_yaml_parse_full() {
     let yaml = r#"
 telegram_bot_token: my_token
 bot_username: mybot
-llm_provider: openai
-api_key: sk-test123
-model: gpt-4o
-llm_base_url: https://custom.api.com/v1
+llm_provider: codex-app
+model: gpt-5.4
 max_tokens: 4096
 max_tool_iterations: 10
 max_history_messages: 100
@@ -136,12 +134,9 @@ discord_allowed_channels:
 "#;
     let config: Config = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(config.telegram_bot_token, "my_token");
-    assert_eq!(config.llm_provider, "openai");
-    assert_eq!(config.model, "gpt-4o");
-    assert_eq!(
-        config.llm_base_url.as_deref(),
-        Some("https://custom.api.com/v1")
-    );
+    assert_eq!(config.llm_provider, "codex-app");
+    assert_eq!(config.model, "gpt-5.4");
+    assert_eq!(config.llm_base_url.as_deref(), None);
     assert_eq!(config.max_tokens, 4096);
     assert_eq!(config.max_tool_iterations, 10);
     assert_eq!(config.max_history_messages, 100);

@@ -5,10 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::codex_auth::{
-    codex_auth_file_has_access_token, is_codex_app_server_provider, is_openai_codex_provider,
-    is_qwen_portal_provider, provider_allows_empty_api_key, qwen_oauth_file_has_access_token,
-};
+use crate::codex_auth::is_codex_app_provider;
 use crate::plugins::PluginsConfig;
 use microclaw_core::error::MicroClawError;
 pub use microclaw_tools::sandbox::{SandboxBackend, SandboxConfig, SandboxMode, SecurityProfile};
@@ -23,7 +20,7 @@ fn default_bot_username() -> String {
     String::new()
 }
 fn default_llm_provider() -> String {
-    "anthropic".into()
+    "codex-app".into()
 }
 fn default_api_key() -> String {
     String::new()
@@ -1108,9 +1105,9 @@ impl Config {
         Self {
             telegram_bot_token: "tok".into(),
             bot_username: "bot".into(),
-            llm_provider: "anthropic".into(),
-            api_key: "key".into(),
-            model: "claude-sonnet-4-5-20250929".into(),
+            llm_provider: "codex-app".into(),
+            api_key: String::new(),
+            model: "gpt-5.4".into(),
             provider_presets: HashMap::new(),
             llm_providers: HashMap::new(),
             llm_base_url: None,
@@ -1332,22 +1329,27 @@ impl Config {
 
     /// Apply post-deserialization normalization and validation.
     pub(crate) fn post_deserialize(&mut self) -> Result<(), MicroClawError> {
-        self.llm_provider = self.llm_provider.trim().to_lowercase();
+        let raw_llm_provider = self.llm_provider.trim().to_string();
+        self.llm_provider =
+            if raw_llm_provider.is_empty() || is_codex_app_provider(&raw_llm_provider) {
+                "codex-app".into()
+            } else {
+                raw_llm_provider.to_ascii_lowercase()
+            };
+        if !is_codex_app_provider(&self.llm_provider) {
+            return Err(MicroClawError::Config(format!(
+                "Unsupported llm_provider '{}'. Only codex-app is supported.",
+                raw_llm_provider
+            )));
+        }
 
         // Apply provider-specific default model if empty
         if self.model.is_empty() {
-            self.model = match self.llm_provider.as_str() {
-                "anthropic" => "claude-sonnet-4-5-20250929".into(),
-                "codex-app" => "gpt-5.4".into(),
-                "codex-app-server" => "gpt-5.4".into(),
-                "ollama" => "llama3.2".into(),
-                "openai-codex" => "gpt-5.3-codex".into(),
-                _ => "gpt-5.2".into(),
-            };
+            self.model = "gpt-5.4".into();
         }
         self.model = self.model.trim().to_string();
         if self.model.is_empty() {
-            self.model = "gpt-5.2".into();
+            self.model = "gpt-5.4".into();
         }
         self.provider_presets =
             normalize_provider_profiles(std::mem::take(&mut self.provider_presets));
@@ -1752,13 +1754,10 @@ Use operator password + API keys for Web auth."
                 "At least one channel must be enabled and configured (via channels.<name>.enabled or legacy channel settings)".into(),
             ));
         }
-        if self.api_key.is_empty() && !provider_allows_empty_api_key(&self.llm_provider) {
-            return Err(MicroClawError::Config("api_key is required".into()));
-        }
-        if is_openai_codex_provider(&self.llm_provider) {
+        if is_codex_app_provider(&self.llm_provider) {
             if !self.api_key.trim().is_empty() {
                 return Err(MicroClawError::Config(
-                    "openai-codex ignores microclaw.config.yaml api_key. Configure ~/.codex/auth.json or run `codex login` instead.".into(),
+                    "codex-app ignores microclaw.config.yaml api_key. Configure Codex via `codex login` instead.".into(),
                 ));
             }
             if self
@@ -1768,38 +1767,7 @@ Use operator password + API keys for Web auth."
                 .unwrap_or(false)
             {
                 return Err(MicroClawError::Config(
-                    "openai-codex ignores microclaw.config.yaml llm_base_url. Configure ~/.codex/config.toml instead.".into(),
-                ));
-            }
-            let has_codex_auth = codex_auth_file_has_access_token()?;
-            if !has_codex_auth {
-                return Err(MicroClawError::Config(
-                    "openai-codex requires ~/.codex/auth.json (access token or OPENAI_API_KEY), or OPENAI_CODEX_ACCESS_TOKEN. Run `codex login` or update Codex config files.".into(),
-                ));
-            }
-        }
-        if is_codex_app_server_provider(&self.llm_provider) {
-            if !self.api_key.trim().is_empty() {
-                return Err(MicroClawError::Config(
-                    "codex-app-server ignores microclaw.config.yaml api_key. Configure Codex via `codex login` or ~/.codex/config.toml instead.".into(),
-                ));
-            }
-            if self
-                .llm_base_url
-                .as_ref()
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
-            {
-                return Err(MicroClawError::Config(
-                    "codex-app-server ignores microclaw.config.yaml llm_base_url. It launches the local `codex app-server` binary and uses Codex CLI config instead.".into(),
-                ));
-            }
-        }
-        if is_qwen_portal_provider(&self.llm_provider) && self.api_key.trim().is_empty() {
-            let has_qwen_auth = qwen_oauth_file_has_access_token()?;
-            if !has_qwen_auth {
-                return Err(MicroClawError::Config(
-                    "qwen-portal requires api_key, or ~/.qwen/oauth_creds.json (access_token), or QWEN_PORTAL_ACCESS_TOKEN.".into(),
+                    "codex-app ignores microclaw.config.yaml llm_base_url. It launches the local `codex app-server` binary and uses Codex CLI config instead.".into(),
                 ));
             }
         }
@@ -2010,21 +1978,9 @@ fn normalize_provider_profiles(
             if alias.is_empty() {
                 return None;
             }
-            profile.provider = profile
-                .provider
-                .as_ref()
-                .map(|v| v.trim().to_ascii_lowercase())
-                .filter(|v| !v.is_empty());
-            profile.api_key = profile
-                .api_key
-                .as_ref()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty());
-            profile.llm_base_url = profile
-                .llm_base_url
-                .as_ref()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty());
+            profile.provider = Some("codex-app".to_string());
+            profile.api_key = None;
+            profile.llm_base_url = None;
             profile.llm_user_agent = profile
                 .llm_user_agent
                 .as_ref()
@@ -2723,11 +2679,13 @@ channels:
     }
 
     #[test]
-    fn test_post_deserialize_codex_app_server_default_model() {
+    fn test_post_deserialize_rejects_codex_app_server_provider() {
         let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: codex-app-server\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        config.post_deserialize().unwrap();
-        assert_eq!(config.model, "gpt-5.4");
+        let err = config.post_deserialize().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Unsupported llm_provider 'codex-app-server'"));
     }
 
     #[test]
@@ -2739,21 +2697,12 @@ channels:
     }
 
     #[test]
-    fn test_post_deserialize_codex_app_server_rejects_api_key() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: codex-app-server\napi_key: sk-stale\n";
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        let err = config.post_deserialize().unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("codex-app-server ignores microclaw.config.yaml api_key"));
-    }
-
-    #[test]
     fn test_post_deserialize_codex_app_rejects_api_key() {
         let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: codex-app\napi_key: sk-stale\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         let err = config.post_deserialize().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("codex-app-server ignores microclaw.config.yaml api_key"));
+        assert!(msg.contains("codex-app ignores microclaw.config.yaml api_key"));
     }
 
     #[test]

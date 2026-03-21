@@ -20,10 +20,10 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::DefaultTerminal;
 
 use crate::codex_auth::{
-    codex_auth_file_has_access_token, codex_config_default_openai_base_url,
-    is_codex_app_server_provider, is_openai_codex_provider, provider_allows_empty_api_key,
-    qwen_oauth_file_has_access_token, resolve_openai_codex_auth, resolve_qwen_portal_auth,
+    codex_auth_file_has_access_token, is_codex_app_provider, provider_allows_empty_api_key,
 };
+#[cfg(test)]
+use crate::codex_auth::{codex_config_default_openai_base_url, is_openai_codex_provider};
 use crate::config::{Config, LlmProviderProfile, SandboxBackend, SandboxMode};
 use crate::http_client::llm_user_agent;
 use microclaw_core::error::MicroClawError;
@@ -721,253 +721,23 @@ fn default_souls_dir_for_setup() -> String {
         .to_string()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ProviderProtocol {
-    Anthropic,
-    CodexApp,
-    OpenAiCompat,
-}
-
 #[derive(Clone, Copy)]
 struct ProviderPreset {
     id: &'static str,
     label: &'static str,
-    protocol: ProviderProtocol,
     default_base_url: &'static str,
     models: &'static [&'static str],
 }
 
-const PROVIDER_PRESETS: &[ProviderPreset] = &[
-    ProviderPreset {
-        id: "openai",
-        label: "OpenAI",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.openai.com/v1",
-        models: &["gpt-5.2", "gpt-5", "gpt-5-mini"],
-    },
-    ProviderPreset {
-        id: "openai-codex",
-        label: "OpenAI Codex",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "",
-        models: &["gpt-5.3-codex", "gpt-5.2-codex", "gpt-5-codex"],
-    },
-    ProviderPreset {
-        id: "codex-app",
-        label: "Codex App (local CLI)",
-        protocol: ProviderProtocol::CodexApp,
-        default_base_url: "",
-        models: &["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"],
-    },
-    ProviderPreset {
-        id: "openrouter",
-        label: "OpenRouter",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://openrouter.ai/api/v1",
-        models: &[
-            "openrouter/auto",
-            "openai/gpt-5.2",
-            "anthropic/claude-sonnet-4.5",
-        ],
-    },
-    ProviderPreset {
-        id: "anthropic",
-        label: "Anthropic",
-        protocol: ProviderProtocol::Anthropic,
-        default_base_url: "",
-        models: &[
-            "claude-sonnet-4-5-20250929",
-            "claude-opus-4-6-20260205",
-            "claude-haiku-4-5-20250929",
-        ],
-    },
-    ProviderPreset {
-        id: "ollama",
-        label: "Ollama (local)",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "http://127.0.0.1:11434/v1",
-        models: &["llama3.2", "qwen2.5-coder:7b", "mistral"],
-    },
-    ProviderPreset {
-        id: "google",
-        label: "Google DeepMind",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-        models: &[
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-        ],
-    },
-    ProviderPreset {
-        id: "aliyun-bailian",
-        label: "Alibaba Cloud Bailian",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://coding.dashscope.aliyuncs.com/v1",
-        models: &["qwen3.5-plus", "qwen3-max", "qwen-plus-latest"],
-    },
-    ProviderPreset {
-        id: "alibaba",
-        label: "Alibaba Cloud (Qwen / DashScope)",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        models: &["qwen3-max", "qwen3-plus", "qwen-max-latest"],
-    },
-    ProviderPreset {
-        id: "qwen-portal",
-        label: "Qwen Portal (OAuth)",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://portal.qwen.ai/v1",
-        models: &["coder-model", "vision-model", "qwen3.5-plus"],
-    },
-    ProviderPreset {
-        id: "deepseek",
-        label: "DeepSeek",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.deepseek.com/v1",
-        models: &["deepseek-chat", "deepseek-reasoner", "deepseek-v3"],
-    },
-    ProviderPreset {
-        id: "synthetic",
-        label: "Synthetic",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.synthetic.new/openai/v1",
-        models: &["hf:openai/gpt-oss-120b", "hf:deepseek-ai/DeepSeek-V3-0324"],
-    },
-    ProviderPreset {
-        id: "chutes",
-        label: "Chutes",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://llm.chutes.ai/v1",
-        models: &[
-            "deepseek-ai/DeepSeek-V3-0324",
-            "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-        ],
-    },
-    ProviderPreset {
-        id: "moonshot",
-        label: "Moonshot AI (Kimi)",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.moonshot.cn/v1",
-        models: &["kimi-k2.5", "kimi-k2", "kimi-latest"],
-    },
-    ProviderPreset {
-        id: "mistral",
-        label: "Mistral AI",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.mistral.ai/v1",
-        models: &[
-            "mistral-large-latest",
-            "mistral-medium-latest",
-            "ministral-8b-latest",
-        ],
-    },
-    ProviderPreset {
-        id: "azure",
-        label: "Microsoft Azure AI",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url:
-            "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT",
-        models: &["gpt-5.2", "gpt-5", "gpt-4.1"],
-    },
-    ProviderPreset {
-        id: "bedrock",
-        label: "Amazon AWS Bedrock",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://bedrock-runtime.YOUR-REGION.amazonaws.com/openai/v1",
-        models: &[
-            "anthropic.claude-opus-4-6-v1",
-            "anthropic.claude-sonnet-4-5-v2",
-            "anthropic.claude-haiku-4-5-v1",
-        ],
-    },
-    ProviderPreset {
-        id: "zhipu",
-        label: "Zhipu AI (GLM / Z.AI)",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://open.bigmodel.cn/api/paas/v4",
-        models: &["glm-4.7", "glm-4.7-flash", "glm-4.5-air"],
-    },
-    ProviderPreset {
-        id: "minimax",
-        label: "MiniMax",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.minimax.io/v1",
-        models: &["MiniMax-M2.5", "MiniMax-M2.5-Thinking", "MiniMax-M2.1"],
-    },
-    ProviderPreset {
-        id: "cohere",
-        label: "Cohere",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.cohere.ai/compatibility/v1",
-        models: &[
-            "command-a-03-2025",
-            "command-r-plus-08-2024",
-            "command-r-08-2024",
-        ],
-    },
-    ProviderPreset {
-        id: "tencent",
-        label: "Tencent AI Lab",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.hunyuan.cloud.tencent.com/v1",
-        models: &[
-            "hunyuan-t1-latest",
-            "hunyuan-turbos-latest",
-            "hunyuan-standard-latest",
-        ],
-    },
-    ProviderPreset {
-        id: "xai",
-        label: "xAI",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.x.ai/v1",
-        models: &["grok-4", "grok-4-fast", "grok-3"],
-    },
-    ProviderPreset {
-        id: "nvidia",
-        label: "NVIDIA NIM",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://integrate.api.nvidia.com/v1",
-        models: &[
-            "meta/llama-3.3-70b-instruct",
-            "meta/llama-3.1-70b-instruct",
-            "nvidia/llama-3.1-nemotron-ultra-253b-v1",
-        ],
-    },
-    ProviderPreset {
-        id: "huggingface",
-        label: "Hugging Face",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://router.huggingface.co/v1",
-        models: &[
-            "Qwen/Qwen3-Coder-Next",
-            "meta-llama/Llama-3.3-70B-Instruct",
-            "deepseek-ai/DeepSeek-V3",
-        ],
-    },
-    ProviderPreset {
-        id: "together",
-        label: "Together AI",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "https://api.together.xyz/v1",
-        models: &[
-            "deepseek-ai/DeepSeek-V3",
-            "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-            "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
-        ],
-    },
-    ProviderPreset {
-        id: "custom",
-        label: "Custom (manual config)",
-        protocol: ProviderProtocol::OpenAiCompat,
-        default_base_url: "",
-        models: &["custom-model"],
-    },
-];
+const PROVIDER_PRESETS: &[ProviderPreset] = &[ProviderPreset {
+    id: "codex-app",
+    label: "Codex App (local CLI)",
+    default_base_url: "",
+    models: &["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"],
+}];
 
 fn find_provider_preset(provider: &str) -> Option<&'static ProviderPreset> {
-    let provider = if is_codex_app_server_provider(provider) {
+    let provider = if is_codex_app_provider(provider) {
         "codex-app"
     } else {
         provider
@@ -977,16 +747,10 @@ fn find_provider_preset(provider: &str) -> Option<&'static ProviderPreset> {
         .find(|p| p.id.eq_ignore_ascii_case(provider))
 }
 
-fn provider_protocol(provider: &str) -> ProviderProtocol {
-    find_provider_preset(provider)
-        .map(|p| p.protocol)
-        .unwrap_or(ProviderProtocol::OpenAiCompat)
-}
-
 fn default_model_for_provider(provider: &str) -> &'static str {
     find_provider_preset(provider)
         .and_then(|p| p.models.first().copied())
-        .unwrap_or("gpt-5.2")
+        .unwrap_or("gpt-5.4")
 }
 
 fn is_placeholder_provider_model_list(models: &[&str]) -> bool {
@@ -998,19 +762,10 @@ fn normalize_setup_provider_id(raw: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    if is_codex_app_server_provider(trimmed) {
+    if is_codex_app_provider(trimmed) {
         return "codex-app".to_string();
     }
-    if find_provider_preset(trimmed).is_some() {
-        return trimmed.to_ascii_lowercase();
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if let Some(suffix) = lower.strip_prefix("custom") {
-        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-            return "custom".to_string();
-        }
-    }
-    trimmed.to_string()
+    "codex-app".to_string()
 }
 
 fn provider_display(provider: &str) -> String {
@@ -1164,7 +919,7 @@ impl SetupApp {
             &existing
                 .get("LLM_PROVIDER")
                 .cloned()
-                .unwrap_or_else(|| "anthropic".into()),
+                .unwrap_or_else(|| "codex-app".into()),
         );
         let default_model = default_model_for_provider(&provider);
         let default_base_url = find_provider_preset(&provider)
@@ -1591,16 +1346,16 @@ impl SetupApp {
                 },
                 Field {
                     key: "LLM_PROVIDER".into(),
-                    label: "LLM provider (preset/custom)".into(),
+                    label: "LLM provider".into(),
                     value: provider,
                     required: true,
                     secret: false,
                 },
                 Field {
                     key: "LLM_API_KEY".into(),
-                    label: "LLM API key".into(),
+                    label: "LLM API key (unused)".into(),
                     value: llm_api_key,
-                    required: true,
+                    required: false,
                     secret: true,
                 },
                 Field {
@@ -1615,7 +1370,7 @@ impl SetupApp {
                 },
                 Field {
                     key: "LLM_BASE_URL".into(),
-                    label: "LLM base URL (optional)".into(),
+                    label: "LLM base URL (unused)".into(),
                     value: existing
                         .get("LLM_BASE_URL")
                         .cloned()
@@ -3245,7 +3000,7 @@ impl SetupApp {
         let entry = page.entries.get(page.selected)?;
         match page.field_selected {
             0 => Some(SetupApp::next_provider_preset_id(&page.entries)),
-            1 => Some("anthropic".to_string()),
+            1 => Some("codex-app".to_string()),
             2 => Some(String::new()),
             3 => Some(default_model_for_provider(&entry.provider).to_string()),
             4 => Some(
@@ -4383,38 +4138,24 @@ impl SetupApp {
             }
         }
 
-        let provider = self.field_value("LLM_PROVIDER");
+        let provider = normalize_setup_provider_id(&self.field_value("LLM_PROVIDER"));
         if provider.is_empty() {
             return Err(MicroClawError::Config("LLM_PROVIDER is required".into()));
         }
-        if is_codex_app_server_provider(&provider) {
-            if !self.field_value("LLM_API_KEY").trim().is_empty() {
-                return Err(MicroClawError::Config(
-                    "codex-app ignores LLM_API_KEY here. Configure Codex via `codex login` or ~/.codex/config.toml instead.".into(),
-                ));
-            }
-            if !self.field_value("LLM_BASE_URL").trim().is_empty() {
-                return Err(MicroClawError::Config(
-                    "codex-app ignores LLM_BASE_URL here. It launches the local `codex app-server` binary and uses Codex CLI config instead.".into(),
-                ));
-            }
-        } else if is_openai_codex_provider(&provider) {
-            if !self.field_value("LLM_API_KEY").trim().is_empty() {
-                return Err(MicroClawError::Config(
-                    "openai-codex ignores LLM_API_KEY here. Configure ~/.codex/auth.json or run `codex login`.".into(),
-                ));
-            }
-            if !self.field_value("LLM_BASE_URL").trim().is_empty() {
-                return Err(MicroClawError::Config(
-                    "openai-codex ignores LLM_BASE_URL here. Configure ~/.codex/config.toml instead.".into(),
-                ));
-            }
-        } else if provider.eq_ignore_ascii_case("qwen-portal")
-            && self.field_value("LLM_API_KEY").trim().is_empty()
-            && !qwen_oauth_file_has_access_token()?
-        {
+        if !is_codex_app_provider(&provider) {
             return Err(MicroClawError::Config(
-                "qwen-portal requires LLM_API_KEY, or ~/.qwen/oauth_creds.json (access_token), or QWEN_PORTAL_ACCESS_TOKEN.".into(),
+                "Only codex-app is supported.".into(),
+            ));
+        }
+        if !self.field_value("LLM_API_KEY").trim().is_empty() {
+            return Err(MicroClawError::Config(
+                "codex-app ignores LLM_API_KEY here. Configure Codex via `codex login` instead."
+                    .into(),
+            ));
+        }
+        if !self.field_value("LLM_BASE_URL").trim().is_empty() {
+            return Err(MicroClawError::Config(
+                "codex-app ignores LLM_BASE_URL here. It launches the local `codex app-server` binary and uses Codex CLI config instead.".into(),
             ));
         }
 
@@ -4605,20 +4346,14 @@ impl SetupApp {
         }
         .trim_start_matches('@')
         .to_string();
-        let provider = self.field_value("LLM_PROVIDER").to_lowercase();
-        let (api_key, codex_account_id) = if is_codex_app_server_provider(&provider) {
-            (String::new(), None)
-        } else if is_openai_codex_provider(&provider) {
-            let auth = resolve_openai_codex_auth("")?;
-            (auth.bearer_token, auth.account_id)
-        } else if provider.eq_ignore_ascii_case("qwen-portal")
-            && self.field_value("LLM_API_KEY").trim().is_empty()
-        {
-            let auth = resolve_qwen_portal_auth("")?;
-            (auth.bearer_token, None)
-        } else {
-            (self.field_value("LLM_API_KEY"), None)
-        };
+        let provider = normalize_setup_provider_id(&self.field_value("LLM_PROVIDER"));
+        if !is_codex_app_provider(&provider) {
+            return Err(MicroClawError::Config(
+                "Only codex-app is supported.".into(),
+            ));
+        }
+        let api_key = String::new();
+        let codex_account_id: Option<String> = None;
         let base_url = self.field_value("LLM_BASE_URL");
         let user_agent = self.field_value("LLM_USER_AGENT");
         let model = self.field_value("LLM_MODEL");
@@ -4654,37 +4389,31 @@ impl SetupApp {
             ));
         };
 
-        let provider = entry.provider.trim().to_ascii_lowercase();
+        let provider = normalize_setup_provider_id(&entry.provider);
         if provider.is_empty() {
             return Err(MicroClawError::Config(
                 "Provider profile must set a provider before testing".into(),
             ));
         }
+        if !is_codex_app_provider(&provider) {
+            return Err(MicroClawError::Config(
+                "Only codex-app provider profiles are supported.".into(),
+            ));
+        }
 
         let configured_api_key = entry.api_key.trim().to_string();
-        if is_codex_app_server_provider(&provider) {
-            if !configured_api_key.is_empty() {
-                return Err(MicroClawError::Config(
-                    "codex-app provider profiles ignore API key. Configure Codex via `codex login` instead.".into(),
-                ));
-            }
-            if !entry.base_url.trim().is_empty() {
-                return Err(MicroClawError::Config(
-                    "codex-app provider profiles ignore Base URL. The local `codex app-server` binary uses Codex CLI config instead.".into(),
-                ));
-            }
+        if !configured_api_key.is_empty() {
+            return Err(MicroClawError::Config(
+                "codex-app provider profiles ignore API key. Configure Codex via `codex login` instead.".into(),
+            ));
         }
-        let (api_key, codex_account_id) = if is_codex_app_server_provider(&provider) {
-            (String::new(), None)
-        } else if is_openai_codex_provider(&provider) {
-            let auth = resolve_openai_codex_auth(&configured_api_key)?;
-            (auth.bearer_token, auth.account_id)
-        } else if provider.eq_ignore_ascii_case("qwen-portal") && configured_api_key.is_empty() {
-            let auth = resolve_qwen_portal_auth("")?;
-            (auth.bearer_token, None)
-        } else {
-            (configured_api_key, None)
-        };
+        if !entry.base_url.trim().is_empty() {
+            return Err(MicroClawError::Config(
+                "codex-app provider profiles ignore Base URL. The local `codex app-server` binary uses Codex CLI config instead.".into(),
+            ));
+        }
+        let api_key = String::new();
+        let codex_account_id: Option<String> = None;
 
         let base_url = entry.base_url.trim().to_string();
         let user_agent = entry.user_agent.trim().to_string();
@@ -5159,7 +4888,7 @@ impl SetupApp {
                     String::new()
                 }
             }
-            "LLM_PROVIDER" => "anthropic".into(),
+            "LLM_PROVIDER" => "codex-app".into(),
             "LLM_MODEL" => default_model_for_provider(&provider).into(),
             "LLM_BASE_URL" => find_provider_preset(&provider)
                 .map(|p| p.default_base_url.to_string())
@@ -5297,20 +5026,20 @@ impl SetupApp {
     fn field_guidance(key: &str) -> (&'static str, &'static str) {
         match key {
             "LLM_PROVIDER" => (
-                "Select the LLM backend. Presets auto-fill a sensible model/base URL. OpenRouter models: https://openrouter.ai/models . NVIDIA models: https://build.nvidia.com/models",
-                "Example: anthropic, codex-app, openai, openrouter, nvidia, custom",
+                "Select the LLM backend. Only codex-app is supported.",
+                "Example: codex-app",
             ),
             "LLM_API_KEY" => (
-                "API key for the selected provider. Leave empty for providers that use local auth, such as codex-app.",
-                "Example: sk-xxxx",
+                "Unused for codex-app. Authenticate through the local Codex CLI instead.",
+                "Leave empty",
             ),
             "LLM_MODEL" => (
                 "Default model used when no per-channel override is set.",
-                "Example: qwen3.5-plus",
+                "Example: gpt-5.4",
             ),
             "LLM_BASE_URL" => (
-                "Custom OpenAI-compatible endpoint root. Use provider default if empty.",
-                "Example: https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "Unused for codex-app. The local Codex CLI configuration provides transport settings.",
+                "Leave empty",
             ),
             "LLM_USER_AGENT" => (
                 "HTTP User-Agent for LLM requests. Empty means automatic MicroClaw/<version>.",
@@ -5710,9 +5439,8 @@ fn perform_online_validation(
     base_url: &str,
     configured_user_agent: &str,
     model: &str,
-    codex_account_id: Option<&str>,
+    _codex_account_id: Option<&str>,
 ) -> Result<Vec<String>, MicroClawError> {
-    const VALIDATION_MAX_OUTPUT_TOKENS: u32 = 64;
     let mut checks = Vec::new();
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -5752,159 +5480,52 @@ fn perform_online_validation(
     }
 
     // --- LLM validation: send a minimal "hi" message ---
-    let preset = find_provider_preset(provider);
-    let protocol = provider_protocol(provider);
     let model = if model.is_empty() {
         default_model_for_provider(provider).to_string()
     } else {
         model.to_string()
     };
 
-    if protocol == ProviderProtocol::CodexApp {
-        if !api_key.trim().is_empty() {
-            return Err(MicroClawError::Config(
-                "LLM validation failed: codex-app ignores API key here. Configure Codex via `codex login` instead.".into(),
-            ));
-        }
-        if !base_url.trim().is_empty() {
-            return Err(MicroClawError::Config(
-                "LLM validation failed: codex-app ignores base URL here. It uses the local Codex CLI configuration.".into(),
-            ));
-        }
-        if !codex_auth_file_has_access_token()? {
-            return Err(MicroClawError::Config(
-                "LLM validation failed: codex-app requires Codex CLI auth. Run `codex login` or set OPENAI_CODEX_ACCESS_TOKEN.".into(),
-            ));
-        }
-        let output = std::process::Command::new("codex")
-            .arg("--version")
-            .output()
-            .map_err(|e| {
-                MicroClawError::Config(format!(
-                    "LLM validation failed: could not run `codex --version`: {e}"
-                ))
-            })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let detail = if !stderr.is_empty() {
-                stderr
-            } else if !stdout.is_empty() {
-                stdout
-            } else {
-                format!("exit status {}", output.status)
-            };
-            return Err(MicroClawError::Config(format!(
-                "LLM validation failed: `codex --version` failed: {detail}"
-            )));
-        }
-        checks.push(format!(
-            "LLM OK (codex-app, model={model}; local Codex CLI detected)"
+    if !api_key.trim().is_empty() {
+        return Err(MicroClawError::Config(
+            "LLM validation failed: codex-app ignores API key here. Configure Codex via `codex login` instead.".into(),
         ));
-        return Ok(checks);
     }
-
-    if protocol == ProviderProtocol::Anthropic {
-        let mut base = if base_url.is_empty() {
-            "https://api.anthropic.com".to_string()
-        } else {
-            base_url.trim_end_matches('/').to_string()
-        };
-        if base.ends_with("/v1/messages") {
-            base = base.trim_end_matches("/v1/messages").to_string();
-        }
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": VALIDATION_MAX_OUTPUT_TOKENS,
-            "messages": [{"role": "user", "content": "hi"}]
-        });
-        let resp = client
-            .post(format!("{base}/v1/messages"))
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .body(body.to_string())
-            .send()?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().unwrap_or_default();
-            let detail = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| {
-                    v.get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| format!("HTTP {status}"));
-            return Err(MicroClawError::Config(format!(
-                "LLM validation failed: {detail}"
-            )));
-        }
-        checks.push(format!("LLM OK (anthropic, model={model})"));
-    } else {
-        let base = resolve_openai_compat_validation_base(provider, base_url, preset);
-        let resp = if is_openai_codex_provider(provider) {
-            let body = serde_json::json!({
-                "model": model,
-                "input": [{"type":"message","role":"user","content":"hi"}],
-                "instructions": "You are a helpful assistant.",
-                "store": false,
-                "stream": true,
-            });
-            let mut req = client
-                .post(format!("{}/responses", base.trim_end_matches('/')))
-                .header("content-type", "application/json")
-                .body(body.to_string());
-            if !api_key.trim().is_empty() {
-                req = req.bearer_auth(api_key);
-            }
-            if let Some(account_id) = codex_account_id {
-                if !account_id.trim().is_empty() {
-                    req = req.header("ChatGPT-Account-ID", account_id.trim());
-                }
-            }
-            req.send()?
-        } else {
-            let endpoint = format!("{}/chat/completions", base.trim_end_matches('/'));
-            let mut body = serde_json::json!({
-                "model": model,
-                "max_tokens": VALIDATION_MAX_OUTPUT_TOKENS,
-                "messages": [{"role": "user", "content": "hi"}]
-            });
-            let mut resp = send_openai_validation_chat_request(&client, &endpoint, api_key, &body)?;
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let text = resp.text().unwrap_or_default();
-                if should_retry_with_max_completion_tokens(&text)
-                    && switch_to_max_completion_tokens(&mut body)
-                {
-                    resp = send_openai_validation_chat_request(&client, &endpoint, api_key, &body)?;
-                } else {
-                    return Err(MicroClawError::Config(format!(
-                        "LLM validation failed: {}",
-                        extract_openai_error_detail(status, &text)
-                    )));
-                }
-            }
-            resp
-        };
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().unwrap_or_default();
-            if is_validation_output_capped_error(&text) {
-                checks.push(format!(
-                    "LLM OK (openai-compatible, model={model}; probe output capped)"
-                ));
-                return Ok(checks);
-            }
-            let detail = extract_openai_error_detail(status, &text);
-            return Err(MicroClawError::Config(format!(
-                "LLM validation failed: {detail}"
-            )));
-        }
-        checks.push(format!("LLM OK (openai-compatible, model={model})"));
+    if !base_url.trim().is_empty() {
+        return Err(MicroClawError::Config(
+            "LLM validation failed: codex-app ignores base URL here. It uses the local Codex CLI configuration.".into(),
+        ));
     }
+    if !codex_auth_file_has_access_token()? {
+        return Err(MicroClawError::Config(
+            "LLM validation failed: codex-app requires Codex CLI auth. Run `codex login` or set OPENAI_CODEX_ACCESS_TOKEN.".into(),
+        ));
+    }
+    let output = std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            MicroClawError::Config(format!(
+                "LLM validation failed: could not run `codex --version`: {e}"
+            ))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("exit status {}", output.status)
+        };
+        return Err(MicroClawError::Config(format!(
+            "LLM validation failed: `codex --version` failed: {detail}"
+        )));
+    }
+    checks.push(format!(
+        "LLM OK (codex-app, model={model}; local Codex CLI detected)"
+    ));
 
     Ok(checks)
 }
@@ -5915,6 +5536,8 @@ fn push_telegram_disabled_status(checks: &mut Vec<String>, include_telegram_stat
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn send_openai_validation_chat_request(
     client: &reqwest::blocking::Client,
     endpoint: &str,
@@ -5931,6 +5554,8 @@ fn send_openai_validation_chat_request(
     req.send()
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn extract_openai_error_detail(status: reqwest::StatusCode, text: &str) -> String {
     fn extract_message(value: &serde_json::Value) -> Option<String> {
         if let Some(message) = value.get("message").and_then(|m| m.as_str()) {
@@ -5957,6 +5582,8 @@ fn extract_openai_error_detail(status: reqwest::StatusCode, text: &str) -> Strin
         .unwrap_or_else(|| format!("HTTP {status}"))
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn should_retry_with_max_completion_tokens(error_text: &str) -> bool {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(error_text) {
         let param_is_max_tokens = value
@@ -5974,12 +5601,16 @@ fn should_retry_with_max_completion_tokens(error_text: &str) -> bool {
     lower.contains("max_tokens") && lower.contains("max_completion_tokens")
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn is_validation_output_capped_error(error_text: &str) -> bool {
     let lower = error_text.to_ascii_lowercase();
     lower.contains("max_tokens or model output limit was reached")
         || (lower.contains("max_tokens") && lower.contains("output limit"))
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn switch_to_max_completion_tokens(body: &mut serde_json::Value) -> bool {
     if body.get("max_completion_tokens").is_some() {
         return false;
@@ -5995,6 +5626,8 @@ fn switch_to_max_completion_tokens(body: &mut serde_json::Value) -> bool {
     false
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn resolve_openai_compat_validation_base(
     provider: &str,
     base_url: &str,
@@ -6903,12 +6536,8 @@ fn save_config_yaml(
     }
     yaml.push('\n');
 
-    yaml.push_str(
-        "# LLM provider (anthropic, codex-app, openai-codex, ollama, openai, openrouter, deepseek, synthetic, chutes, google, etc.)\n",
-    );
+    yaml.push_str("# LLM provider (codex-app only)\n");
     yaml.push_str(&format!("llm_provider: \"{}\"\n", get("LLM_PROVIDER")));
-    yaml.push_str("# API key for LLM provider\n");
-    yaml.push_str(&format!("api_key: \"{}\"\n", get("LLM_API_KEY")));
 
     let model = get("LLM_MODEL");
     if !model.is_empty() {
@@ -6930,15 +6559,10 @@ fn save_config_yaml(
         yaml.push_str("# Optional reusable provider profiles for per-bot/channel selection\n");
         yaml.push_str("# provider_presets:\n");
         yaml.push_str("#   provider1:\n");
-        yaml.push_str("#     provider: \"openai\"\n");
-        yaml.push_str("#     api_key: \"sk-...\"\n");
-        yaml.push_str("#     llm_base_url: \"https://example.com/v1\"\n");
+        yaml.push_str("#     provider: \"codex-app\"\n");
         yaml.push_str("#     llm_user_agent: \"microclaw/1.0\"\n");
-        yaml.push_str("#     default_model: \"gpt-5.2\"\n");
+        yaml.push_str("#     default_model: \"gpt-5.4\"\n");
         yaml.push_str("#     show_thinking: false\n");
-        yaml.push_str("#   deepseek-hk:\n");
-        yaml.push_str("#     provider: \"deepseek\"\n");
-        yaml.push_str("#     api_key: \"sk-...\"\n");
     } else {
         yaml.push_str("provider_presets:\n");
         let yaml_presets = serde_yaml::to_value(&provider_presets).map_err(|e| {
@@ -6952,13 +6576,6 @@ fn save_config_yaml(
         .unwrap_or(false);
     yaml.push_str("# Show model thinking/reasoning text when available\n");
     yaml.push_str(&format!("show_thinking: {}\n", show_thinking));
-    yaml.push_str("# OpenAI-compatible request body overrides (optional)\n");
-    yaml.push_str("# Use null to unset a default key for selected provider/model.\n");
-    yaml.push_str("# openai_compat_body_overrides: { temperature: 0.2 }\n");
-    yaml.push_str("# openai_compat_body_overrides_by_provider:\n");
-    yaml.push_str("#   deepseek: { top_p: null, reasoning_effort: \"high\" }\n");
-    yaml.push_str("# openai_compat_body_overrides_by_model:\n");
-    yaml.push_str("#   gpt-5.2: { response_format: { type: \"json_object\" } }\n");
 
     yaml.push('\n');
     yaml.push_str(&format!("data_dir: {}\n", yaml_double_quoted(&data_dir)));
@@ -10507,9 +10124,8 @@ sandbox:
     }
 
     #[test]
-    fn test_normalize_setup_provider_id_maps_codex_app_server_alias() {
+    fn test_normalize_setup_provider_id_keeps_codex_app() {
         assert_eq!(normalize_setup_provider_id("codex-app"), "codex-app");
-        assert_eq!(normalize_setup_provider_id("codex-app-server"), "codex-app");
     }
 
     #[test]
@@ -10644,7 +10260,6 @@ sandbox:
     #[test]
     fn test_provider_presets_include_synthetic_chutes_and_qwen_code() {
         assert!(find_provider_preset("codex-app").is_some());
-        assert!(find_provider_preset("codex-app-server").is_some());
         assert!(find_provider_preset("synthetic").is_some());
         assert!(find_provider_preset("chutes").is_some());
         assert!(find_provider_preset("qwen-portal").is_some());

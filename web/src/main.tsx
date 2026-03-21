@@ -270,44 +270,15 @@ type UiTheme =
   | 'indigo'
 
 const PROVIDER_SUGGESTIONS = [
-  'openai',
-  'openai-codex',
-  'ollama',
-  'openrouter',
-  'anthropic',
-  'google',
-  'aliyun-bailian',
-  'alibaba',
-  'deepseek',
-  'moonshot',
-  'mistral',
-  'azure',
-  'bedrock',
-  'zhipu',
-  'minimax',
-  'cohere',
-  'tencent',
-  'xai',
-  'nvidia',
-  'huggingface',
-  'together',
-  'custom',
+  'codex-app',
 ]
 
 const MODEL_OPTIONS: Record<string, string[]> = {
-  anthropic: ['claude-sonnet-4-5-20250929', 'claude-opus-4-1-20250805', 'claude-3-7-sonnet-latest'],
-  openai: ['gpt-5.2'],
-  'openai-codex': ['gpt-5.3-codex'],
-  ollama: ['llama3.2', 'qwen2.5', 'deepseek-r1'],
-  openrouter: ['openai/gpt-5', 'anthropic/claude-sonnet-4-5', 'google/gemini-2.5-pro'],
-  deepseek: ['deepseek-chat', 'deepseek-reasoner'],
-  google: ['gemini-2.5-pro', 'gemini-2.5-flash'],
-  'aliyun-bailian': ['qwen3.5-plus', 'qwen3-max', 'qwen-plus-latest'],
-  nvidia: ['meta/llama-3.3-70b-instruct', 'meta/llama-3.1-70b-instruct'],
+  'codex-app': ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex'],
 }
 
 const DEFAULT_CONFIG_VALUES = {
-  llm_provider: 'anthropic',
+  llm_provider: 'codex-app',
   working_dir_isolation: 'chat',
   high_risk_tool_user_confirmation_required: true,
   max_tokens: 8192,
@@ -609,11 +580,11 @@ function nextClonedProviderProfileId(entries: ProviderProfileDraft[], sourceId: 
 function emptyProviderProfileDraft(entries: ProviderProfileDraft[]): ProviderProfileDraft {
   return {
     id: nextProviderProfileId(entries),
-    provider: 'anthropic',
+    provider: 'codex-app',
     api_key: '',
     llm_base_url: '',
     llm_user_agent: '',
-    default_model: defaultModelForProvider('anthropic'),
+    default_model: defaultModelForProvider('codex-app'),
     show_thinking: false,
   }
 }
@@ -622,7 +593,7 @@ function normalizeProviderProfileDraft(raw: unknown, fallbackId = ''): ProviderP
   const draft = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   return {
     id: String(draft.id || fallbackId || '').trim(),
-    provider: String(draft.provider || '').trim(),
+    provider: 'codex-app',
     api_key: typeof draft.api_key === 'string' && draft.api_key.trim() === '***' ? '' : String(draft.api_key || ''),
     llm_base_url: String(draft.llm_base_url || ''),
     llm_user_agent: String(draft.llm_user_agent || ''),
@@ -649,9 +620,7 @@ function serializeProviderProfiles(entries: ProviderProfileDraft[]): Record<stri
     const id = entry.id.trim().toLowerCase()
     if (!id || id === 'main') continue
     out[id] = {
-      ...(entry.provider.trim() ? { provider: entry.provider.trim().toLowerCase() } : {}),
-      ...(entry.api_key.trim() ? { api_key: entry.api_key.trim() } : {}),
-      ...(entry.llm_base_url.trim() ? { llm_base_url: entry.llm_base_url.trim() } : {}),
+      provider: 'codex-app',
       ...(entry.llm_user_agent.trim() ? { llm_user_agent: entry.llm_user_agent.trim() } : {}),
       ...(entry.default_model.trim() ? { default_model: entry.default_model.trim() } : {}),
       show_thinking: Boolean(entry.show_thinking),
@@ -675,12 +644,12 @@ function providerProfileOptions(entries: ProviderProfileDraft[], currentRaw: unk
     if (!id || seen.has(id)) continue
     options.push({
       value: id,
-      label: `${id} · ${String(entry.provider || 'custom').trim() || 'custom'} / ${String(entry.default_model || '').trim() || '(no model)'}`,
+      label: `${id} · ${String(entry.provider || 'codex-app').trim() || 'codex-app'} / ${String(entry.default_model || '').trim() || '(no model)'}`,
     })
     seen.add(id)
   }
   if (current && !seen.has(current)) {
-    options.push({ value: current, label: `${current} · custom/current` })
+    options.push({ value: current, label: `${current} · codex-app/current` })
   }
   return options
 }
@@ -774,14 +743,8 @@ function resetProviderProfileReferencesToMain(
 }
 
 function defaultModelForProvider(providerRaw: string): string {
-  const provider = providerRaw.trim().toLowerCase()
-  if (provider === 'anthropic') return 'claude-sonnet-4-5-20250929'
-  if (provider === 'openai-codex') return 'gpt-5.3-codex'
-  if (provider === 'ollama') return 'llama3.2'
-  if (provider === 'google') return 'gemini-2.5-pro'
-  if (provider === 'aliyun-bailian') return 'qwen3.5-plus'
-  if (provider === 'nvidia') return 'meta/llama-3.3-70b-instruct'
-  return 'gpt-5.2'
+  void providerRaw
+  return 'gpt-5.4'
 }
 
 function normalizeAccountId(raw: unknown): string {
@@ -2181,8 +2144,8 @@ function App() {
       const ircCfg = channelsCfg.irc || {}
       const a2aCfg = ((data.config?.a2a as Record<string, unknown> | undefined) || {})
       setConfigDraft({
-        llm_provider: data.config?.llm_provider || '',
-        model: data.config?.model || defaultModelForProvider(String(data.config?.llm_provider || 'anthropic')),
+        llm_provider: data.config?.llm_provider || DEFAULT_CONFIG_VALUES.llm_provider,
+        model: data.config?.model || defaultModelForProvider(String(data.config?.llm_provider || DEFAULT_CONFIG_VALUES.llm_provider)),
         llm_base_url: String(data.config?.llm_base_url || ''),
         llm_user_agent: String(data.config?.llm_user_agent || ''),
         api_key: '',
@@ -2665,18 +2628,8 @@ function App() {
 
   async function saveConfigChanges(): Promise<void> {
     try {
-      const provider = String(configDraft.llm_provider || '').trim().toLowerCase()
-      if (provider === 'openai-codex') {
-        const apiKey = String(configDraft.api_key || '').trim()
-        const baseUrl = String(configDraft.llm_base_url || '').trim()
-        if (apiKey || baseUrl) {
-          setSaveStatus('Save failed: openai-codex ignores api_key/llm_base_url in microclaw config. Configure ~/.codex/auth.json and ~/.codex/config.toml.')
-          return
-        }
-      }
-
       const payload: Record<string, unknown> = {
-        llm_provider: String(configDraft.llm_provider || ''),
+        llm_provider: String(configDraft.llm_provider || DEFAULT_CONFIG_VALUES.llm_provider),
         model: String(configDraft.model || ''),
         llm_user_agent: String(configDraft.llm_user_agent || '').trim() || null,
         provider_presets: serializeProviderProfiles(providerProfileDrafts),
@@ -2712,17 +2665,8 @@ function App() {
         a2a_agent_name: String(configDraft.a2a_agent_name || '').trim() || null,
         a2a_agent_description: String(configDraft.a2a_agent_description || '').trim() || null,
         souls_dir: String(configDraft.souls_dir || '').trim() || null,
-      }
-      if (String(configDraft.llm_provider || '').trim().toLowerCase() === 'custom') {
-        payload.llm_base_url = String(configDraft.llm_base_url || '').trim() || null
-      } else if (provider === 'openai-codex') {
-        payload.llm_base_url = null
-      }
-      const apiKey = String(configDraft.api_key || '').trim()
-      if (provider === 'openai-codex') {
-        payload.api_key = ''
-      } else if (apiKey) {
-        payload.api_key = apiKey
+        llm_base_url: null,
+        api_key: '',
       }
 
       const telegramAccountId = normalizeAccountId(configDraft.telegram_account_id)
@@ -3645,20 +3589,12 @@ function App() {
                           LLM provider and API settings.
                         </Text>
                         <Text size="1" color="gray" className="mt-2 block">Global LLM config acts like the main profile. Channel and bot overrides should select a provider profile instead of overriding model directly.</Text>
-                        <Text size="1" color="gray" className="mt-1 block">For custom providers set <code>llm_base_url</code>. For <code>openai-codex</code>, configure auth/provider in <code>~/.codex/auth.json</code> and <code>~/.codex/config.toml</code> (this form ignores <code>api_key</code>/<code>llm_base_url</code>). <code>ollama</code> can leave <code>api_key</code> empty.</Text>
+                        <Text size="1" color="gray" className="mt-1 block">Only <code>codex-app</code> is supported here. Authenticate with the local Codex CLI using <code>codex login</code>.</Text>
                         <div className="mt-4 space-y-3">
                           <ConfigFieldCard
                             label="llm_provider"
                             description={
-                              <>
-                                Select the global main provider backend.
-                                {currentProvider === 'openrouter' ? (
-                                  <> Browse models: <a href="https://openrouter.ai/models" target="_blank" rel="noreferrer">openrouter.ai/models</a>.</>
-                                ) : null}
-                                {currentProvider === 'nvidia' ? (
-                                  <> Browse models: <a href="https://build.nvidia.com/models" target="_blank" rel="noreferrer">build.nvidia.com/models</a>.</>
-                                ) : null}
-                              </>
+                              <>Select the global main provider backend.</>
                             }
                           >
                             <div className="mt-2">
@@ -3683,7 +3619,7 @@ function App() {
                               className="mt-2"
                               value={String(configDraft.model || defaultModelForProvider(String(configDraft.llm_provider || DEFAULT_CONFIG_VALUES.llm_provider)))}
                               onChange={(e) => setConfigField('model', e.target.value)}
-                              placeholder="claude-sonnet-4-5-20250929"
+                              placeholder="gpt-5.4"
                             />
                             {modelOptions.length > 0 ? (
                               <Text size="1" color="gray" className="mt-2 block">Suggested: {modelOptions.join(' / ')}</Text>
@@ -3696,33 +3632,6 @@ function App() {
                               value={String(configDraft.llm_user_agent || '')}
                               onChange={(e) => setConfigField('llm_user_agent', e.target.value)}
                               placeholder="microclaw/1.0"
-                            />
-                          </ConfigFieldCard>
-
-                          {currentProvider === 'custom' ? (
-                            <ConfigFieldCard label="llm_base_url" description={<>Base URL for OpenAI-compatible custom provider endpoint.</>}>
-                              <TextField.Root
-                                className="mt-2"
-                                value={String(configDraft.llm_base_url || '')}
-                                onChange={(e) => setConfigField('llm_base_url', e.target.value)}
-                                placeholder="https://api.example.com/v1"
-                              />
-                          </ConfigFieldCard>
-                          ) : null}
-
-                          <ConfigFieldCard
-                            label="api_key"
-                            description={
-                              currentProvider === 'openai-codex'
-                                ? <>For <code>openai-codex</code>, this field is ignored. Configure <code>~/.codex/auth.json</code> instead.</>
-                                : <>Provider API key. Leave blank to keep current secret unchanged.</>
-                            }
-                          >
-                            <TextField.Root
-                              className="mt-2"
-                              value={String(configDraft.api_key || '')}
-                              onChange={(e) => setConfigField('api_key', e.target.value)}
-                              placeholder={currentProvider === 'openai-codex' ? '(ignored for openai-codex)' : 'sk-...'}
                             />
                           </ConfigFieldCard>
                         </div>
@@ -3756,7 +3665,7 @@ function App() {
                                   <div>
                                     <Text size="2" weight="medium">{entry.id || `Profile #${index + 1}`}</Text>
                                     <Text size="1" color="gray" className="mt-1 block">
-                                      {entry.provider || 'custom'} / {entry.default_model || '(no model)'}
+                                      {entry.provider || 'codex-app'} / {entry.default_model || '(no model)'}
                                     </Text>
                                     <Text size="1" color={inUse ? 'amber' : 'gray'} className="mt-1 block">
                                       {inUse ? `${refs.length} ref(s) · ${refs.join(', ')}` : 'unused'}
@@ -3786,7 +3695,7 @@ function App() {
                                   <ConfigFieldCard label="provider" description={<>Provider backend used by this profile.</>}>
                                     <div className="mt-2">
                                       <Select.Root
-                                        value={entry.provider || 'anthropic'}
+                                        value={entry.provider || 'codex-app'}
                                         onValueChange={(value) => updateProviderProfile(index, {
                                           provider: value,
                                           default_model: entry.default_model || defaultModelForProvider(value),
@@ -3803,22 +3712,6 @@ function App() {
                                       </Select.Root>
                                     </div>
                                   </ConfigFieldCard>
-                                  <ConfigFieldCard label="api_key" description={<>Optional API key. Leave blank to keep current secret unchanged.</>}>
-                                    <TextField.Root
-                                      className="mt-2"
-                                      value={entry.api_key}
-                                      onChange={(e) => updateProviderProfile(index, { api_key: e.target.value })}
-                                      placeholder="sk-..."
-                                    />
-                                  </ConfigFieldCard>
-                                  <ConfigFieldCard label="llm_base_url" description={<>Optional base URL override for this profile.</>}>
-                                    <TextField.Root
-                                      className="mt-2"
-                                      value={entry.llm_base_url}
-                                      onChange={(e) => updateProviderProfile(index, { llm_base_url: e.target.value })}
-                                      placeholder="https://api.example.com/v1"
-                                    />
-                                  </ConfigFieldCard>
                                   <ConfigFieldCard label="llm_user_agent" description={<>Optional HTTP user-agent override for this profile.</>}>
                                     <TextField.Root
                                       className="mt-2"
@@ -3832,7 +3725,7 @@ function App() {
                                       className="mt-2"
                                       value={entry.default_model}
                                       onChange={(e) => updateProviderProfile(index, { default_model: e.target.value })}
-                                      placeholder={defaultModelForProvider(entry.provider || 'anthropic')}
+                                      placeholder={defaultModelForProvider(entry.provider || 'codex-app')}
                                     />
                                   </ConfigFieldCard>
                                 </div>
