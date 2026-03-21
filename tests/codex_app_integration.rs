@@ -89,6 +89,7 @@ if (args.length !== 3 || args[0] !== 'app-server' || args[1] !== '--listen' || a
 
 const threadId = 'thread-test';
 const turnId = 'turn-test';
+const answerItemId = 'item-answer';
 const authRefreshId = 91;
 const finalMessage = JSON.stringify({
   content: [{ type: 'text', text: '4' }],
@@ -142,6 +143,19 @@ function handle(message) {
       },
     });
     send({
+      method: 'item/completed',
+      params: {
+        threadId,
+        turnId,
+        item: {
+          type: 'agentMessage',
+          id: answerItemId,
+          phase: 'final_answer',
+          text: finalMessage,
+        },
+      },
+    });
+    send({
       method: 'turn/completed',
       params: {
         threadId,
@@ -155,6 +169,14 @@ function handle(message) {
   }
 
   if (method === 'initialize') {
+    const capabilities = params.capabilities || {};
+    if (capabilities.experimentalApi !== true) {
+      fail(
+        id,
+        `expected initialize.capabilities.experimentalApi=true, got ${JSON.stringify(capabilities.experimentalApi)}`,
+      );
+      return;
+    }
     send({
       id,
       result: {
@@ -222,29 +244,6 @@ function handle(message) {
       },
     });
     waitingForAuthRefresh = true;
-    return;
-  }
-
-  if (method === 'thread/read') {
-    send({
-      id,
-      result: {
-        thread: {
-          turns: [
-            {
-              id: turnId,
-              items: [
-                {
-                  type: 'agentMessage',
-                  phase: 'final_answer',
-                  text: finalMessage,
-                },
-              ],
-            },
-          ],
-        },
-      },
-    });
     return;
   }
 
@@ -330,7 +329,7 @@ model: gpt-5.4
 }
 
 #[tokio::test]
-#[ignore = "requires live `codex app-server` access; run explicitly with `cargo test codex_app_provider_answers_simple_question_via_live_app_server --test codex_app_integration -- --ignored`"]
+#[ignore = "requires live `codex app-server` access, Codex auth, and outbound network; run explicitly with `cargo test codex_app_provider_answers_simple_question_via_live_app_server --test codex_app_integration -- --ignored`"]
 async fn codex_app_provider_answers_simple_question_via_live_app_server() {
     let config: Config = serde_yaml::from_str(
         r#"
@@ -365,6 +364,7 @@ model: gpt-5.4
         })
         .collect::<Vec<_>>()
         .join("\n");
+    dbg!(&text);
     assert!(
         text.contains('4'),
         "expected live codex-app response to contain `4`, got: {text:?}"

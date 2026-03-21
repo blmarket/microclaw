@@ -169,6 +169,16 @@ type CodexAppServerLines = tokio::io::Lines<BufReader<tokio::process::ChildStdou
 struct CodexAppServerTurnOutcome {
     turn_id: String,
     usage: Option<Usage>,
+    final_response_text: Option<String>,
+    fallback_response_text: Option<String>,
+}
+
+impl CodexAppServerTurnOutcome {
+    fn response_text(&self) -> Option<&str> {
+        self.final_response_text
+            .as_deref()
+            .or(self.fallback_response_text.as_deref())
+    }
 }
 
 pub struct CodexAppServerProvider {
@@ -244,7 +254,7 @@ impl CodexAppServerProvider {
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                     "capabilities": {
-                        "experimentalApi": false,
+                        "experimentalApi": true,
                     }
                 }),
             )
@@ -288,23 +298,20 @@ impl CodexAppServerProvider {
                 })?
                 .to_string();
 
-            codex_app_server_write_request(
-                &mut stdin,
-                3,
-                "turn/start",
-                json!({
-                    "threadId": thread_id.clone(),
-                    "input": [
-                        {
-                            "type": "text",
-                            "text": codex_app_server_turn_input(&sanitized_messages, tools.as_deref())?,
-                            "text_elements": [],
-                        }
-                    ],
-                    "outputSchema": codex_app_server_output_schema(),
-                }),
-            )
-            .await?;
+            let mut turn_start_params = json!({
+                "threadId": thread_id.clone(),
+                "input": [
+                    {
+                        "type": "text",
+                        "text": codex_app_server_turn_input(&sanitized_messages, tools.as_deref())?,
+                        "text_elements": [],
+                    }
+                ],
+            });
+            if let Some(schema) = codex_app_server_output_schema(tools.as_deref()) {
+                turn_start_params["outputSchema"] = schema;
+            }
+            codex_app_server_write_request(&mut stdin, 3, "turn/start", turn_start_params).await?;
             let turn_start =
                 codex_app_server_wait_for_response(&mut stdout_lines, &mut stdin, 3).await?;
             let turn_id = turn_start
@@ -319,29 +326,12 @@ impl CodexAppServerProvider {
                 turn_id.as_deref(),
             )
             .await?;
-
-            codex_app_server_write_request(
-                &mut stdin,
-                4,
-                "thread/read",
-                json!({
-                    "threadId": thread_id,
-                    "includeTurns": true,
-                }),
-            )
-            .await?;
-            let thread_read =
-                codex_app_server_wait_for_response(&mut stdout_lines, &mut stdin, 4).await?;
-            let raw_response =
-                codex_app_server_extract_agent_message(&thread_read, &completion.turn_id)
-                    .ok_or_else(|| {
-                        MicroClawError::LlmApi(
-                            "codex app-server completed the turn without a final agent message"
-                                .into(),
-                        )
-                    })?;
-
-            let mut response = parse_codex_app_server_messages_response(&raw_response)?;
+            let raw_response = completion.response_text().ok_or_else(|| {
+                MicroClawError::LlmApi(
+                    "codex app-server completed the turn without a final agent message".into(),
+                )
+            })?;
+            let mut response = parse_codex_app_server_messages_response(raw_response)?;
             if response.usage.is_none() {
                 response.usage = completion.usage;
             }
@@ -574,6 +564,8 @@ async fn codex_app_server_wait_for_turn_completion(
     let mut outcome = CodexAppServerTurnOutcome {
         turn_id: turn_id_hint.unwrap_or_default().to_string(),
         usage: None,
+        final_response_text: None,
+        fallback_response_text: None,
     };
 
     loop {
@@ -592,6 +584,18 @@ async fn codex_app_server_wait_for_turn_completion(
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         match method {
+            "item/started" | "item/completed" => {
+                let Some(turn_id) = params.get("turnId").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !outcome.turn_id.is_empty() && outcome.turn_id != turn_id {
+                    continue;
+                }
+                outcome.turn_id = turn_id.to_string();
+                if let Some(item) = params.get("item") {
+                    codex_app_server_capture_agent_message(&mut outcome, item);
+                }
+            }
             "thread/tokenUsage/updated" => {
                 let Some(turn_id) = params.get("turnId").and_then(|v| v.as_str()) else {
                     continue;
@@ -704,15 +708,19 @@ Semantic rules:\n\
 - Otherwise `stop_reason` must be `\"end_turn\"`.\n\
 - Treat prior `tool_use` assistant blocks and later `tool_result` user blocks as previous tool executions and their outputs.\n\
 - If no visible text is needed before a tool call, use an empty `content` array or only tool blocks.\n\
-- Leave `usage` omitted or null.\n\
+- Omit `usage`.\n\
 - Do not wrap the JSON in markdown fences.\n\n\
 Available tools:\n{tools_json}\n\n\
 Conversation history:\n{messages_json}\n"
     ))
 }
 
-fn codex_app_server_output_schema() -> serde_json::Value {
-    json!({
+fn codex_app_server_output_schema(tools: Option<&[ToolDefinition]>) -> Option<serde_json::Value> {
+    if tools.is_some_and(|defs| !defs.is_empty()) {
+        return None;
+    }
+
+    Some(json!({
         "type": "object",
         "required": ["content", "stop_reason"],
         "additionalProperties": false,
@@ -720,83 +728,46 @@ fn codex_app_server_output_schema() -> serde_json::Value {
             "content": {
                 "type": "array",
                 "items": {
-                    "oneOf": [
-                        {
-                            "type": "object",
-                            "required": ["type", "text"],
-                            "additionalProperties": false,
-                            "properties": {
-                                "type": { "const": "text" },
-                                "text": { "type": "string" }
-                            }
+                    "type": "object",
+                    "required": ["type", "text"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["text"]
                         },
-                        {
-                            "type": "object",
-                            "required": ["type", "id", "name", "input"],
-                            "additionalProperties": false,
-                            "properties": {
-                                "type": { "const": "tool_use" },
-                                "id": { "type": "string" },
-                                "name": { "type": "string" },
-                                "input": {}
-                            }
-                        }
-                    ]
+                        "text": { "type": "string" }
+                    }
                 }
             },
             "stop_reason": {
-                "type": ["string", "null"],
-                "enum": ["end_turn", "tool_use", "max_tokens", null]
-            },
-            "usage": {
-                "anyOf": [
-                    { "type": "null" },
-                    {
-                        "type": "object",
-                        "required": ["input_tokens", "output_tokens"],
-                        "additionalProperties": false,
-                        "properties": {
-                            "input_tokens": { "type": "integer", "minimum": 0 },
-                            "output_tokens": { "type": "integer", "minimum": 0 }
-                        }
-                    }
-                ]
+                "type": "string",
+                "enum": ["end_turn", "max_tokens"]
             }
         }
-    })
+    }))
 }
 
-fn codex_app_server_extract_agent_message(
-    thread_read_result: &serde_json::Value,
-    turn_id: &str,
-) -> Option<String> {
-    let turns = thread_read_result
-        .get("thread")
-        .and_then(|thread| thread.get("turns"))
-        .and_then(|v| v.as_array())?;
-    let turn = turns.iter().find(|turn| {
-        turn.get("id")
-            .and_then(|v| v.as_str())
-            .map(|id| id == turn_id)
-            .unwrap_or(false)
-    })?;
-    let items = turn.get("items").and_then(|v| v.as_array())?;
-    let mut fallback: Option<String> = None;
-    for item in items {
-        if item.get("type").and_then(|v| v.as_str()) != Some("agentMessage") {
-            continue;
-        }
-        let text = item
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if item.get("phase").and_then(|v| v.as_str()) == Some("final_answer") {
-            return Some(text);
-        }
-        fallback = Some(text);
+fn codex_app_server_capture_agent_message(
+    outcome: &mut CodexAppServerTurnOutcome,
+    item: &serde_json::Value,
+) {
+    if item.get("type").and_then(|v| v.as_str()) != Some("agentMessage") {
+        return;
     }
-    fallback
+    let text = item
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if text.is_empty() {
+        return;
+    }
+    if item.get("phase").and_then(|v| v.as_str()) == Some("final_answer") {
+        outcome.final_response_text = Some(text.to_string());
+    } else {
+        outcome.fallback_response_text = Some(text.to_string());
+    }
 }
 
 fn parse_codex_app_server_messages_response(
@@ -1039,5 +1010,65 @@ mod tests {
         }];
         let sanitized = sanitize_messages(msgs);
         assert!(sanitized.is_empty());
+    }
+
+    #[test]
+    fn test_codex_app_server_capture_agent_message_prefers_final_answer() {
+        let mut outcome = CodexAppServerTurnOutcome::default();
+        codex_app_server_capture_agent_message(
+            &mut outcome,
+            &json!({
+                "type": "agentMessage",
+                "phase": "commentary",
+                "text": "{\"content\":[{\"type\":\"text\",\"text\":\"thinking\"}],\"stop_reason\":\"end_turn\"}"
+            }),
+        );
+        codex_app_server_capture_agent_message(
+            &mut outcome,
+            &json!({
+                "type": "agentMessage",
+                "phase": "final_answer",
+                "text": "{\"content\":[{\"type\":\"text\",\"text\":\"4\"}],\"stop_reason\":\"end_turn\"}"
+            }),
+        );
+
+        assert_eq!(
+            outcome.response_text(),
+            Some("{\"content\":[{\"type\":\"text\",\"text\":\"4\"}],\"stop_reason\":\"end_turn\"}")
+        );
+    }
+
+    #[test]
+    fn test_codex_app_server_output_schema_avoids_unsupported_union_keywords() {
+        fn contains_key(value: &serde_json::Value, needle: &str) -> bool {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.contains_key(needle) || map.values().any(|child| contains_key(child, needle))
+                }
+                serde_json::Value::Array(items) => items.iter().any(|child| contains_key(child, needle)),
+                _ => false,
+            }
+        }
+
+        let schema = codex_app_server_output_schema(None).unwrap();
+        assert!(!contains_key(&schema, "oneOf"));
+        assert!(!contains_key(&schema, "anyOf"));
+        assert!(!contains_key(&schema, "allOf"));
+    }
+
+    #[test]
+    fn test_codex_app_server_output_schema_is_disabled_when_tools_are_present() {
+        let tools = vec![ToolDefinition {
+            name: "echo".into(),
+            description: "Echo input".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                }
+            }),
+        }];
+
+        assert!(codex_app_server_output_schema(Some(&tools)).is_none());
     }
 }
