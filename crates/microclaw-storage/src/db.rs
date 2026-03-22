@@ -1,5 +1,7 @@
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
+#[cfg(feature = "sqlite-vec")]
+use std::ffi::c_char;
 use std::path::Path;
 #[cfg(feature = "sqlite-vec")]
 use std::sync::Once;
@@ -17,7 +19,7 @@ static SQLITE_VEC_AUTOEXT_INIT: Once = Once::new();
 #[cfg(feature = "sqlite-vec")]
 type SqliteAutoExtensionFn = unsafe extern "C" fn(
     *mut rusqlite::ffi::sqlite3,
-    *mut *mut i8,
+    *mut *mut c_char,
     *const rusqlite::ffi::sqlite3_api_routines,
 ) -> i32;
 
