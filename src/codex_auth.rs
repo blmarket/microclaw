@@ -46,6 +46,20 @@ pub fn is_codex_app_provider(provider: &str) -> bool {
     provider.eq_ignore_ascii_case(CODEX_APP_PROVIDER)
 }
 
+pub fn is_codex_app_websocket_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed.starts_with("ws://") || trimmed.starts_with("wss://")
+}
+
+pub fn codex_app_websocket_url(url: Option<&str>) -> Option<String> {
+    let trimmed = url.map(str::trim).filter(|value| !value.is_empty())?;
+    if is_codex_app_websocket_url(trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
 pub fn is_qwen_portal_provider(provider: &str) -> bool {
     provider.eq_ignore_ascii_case(QWEN_PORTAL_PROVIDER)
 }
@@ -557,6 +571,25 @@ mod tests {
         assert!(is_codex_app_provider("CODEX-APP"));
         assert!(!is_codex_app_provider("codex-app-server"));
         assert!(!is_codex_app_provider("openai-codex"));
+    }
+
+    #[test]
+    fn test_is_codex_app_websocket_url() {
+        assert!(is_codex_app_websocket_url("ws://127.0.0.1:9000"));
+        assert!(is_codex_app_websocket_url(" wss://codex.example/ws "));
+        assert!(!is_codex_app_websocket_url("http://127.0.0.1:9000"));
+        assert!(!is_codex_app_websocket_url("stdio://"));
+    }
+
+    #[test]
+    fn test_codex_app_websocket_url() {
+        assert_eq!(
+            codex_app_websocket_url(Some(" ws://127.0.0.1:9000 ")).as_deref(),
+            Some("ws://127.0.0.1:9000")
+        );
+        assert_eq!(codex_app_websocket_url(Some("https://example.com")), None);
+        assert_eq!(codex_app_websocket_url(Some("   ")), None);
+        assert_eq!(codex_app_websocket_url(None), None);
     }
 
     #[test]

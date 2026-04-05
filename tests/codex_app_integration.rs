@@ -7,10 +7,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures_util::{SinkExt, StreamExt};
 use microclaw::config::Config;
 use microclaw::llm::create_provider;
 use microclaw::llm_types::{Message, MessageContent, ResponseContentBlock};
+use serde_json::json;
+use tokio::net::TcpListener;
 use tokio::time::timeout;
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 fn env_lock() -> MutexGuard<'static, ()> {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -271,6 +276,188 @@ process.stdin.resume();
 "#
 }
 
+async fn spawn_fake_codex_websocket_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let thread_id = "thread-ws-test";
+        let turn_id = "turn-ws-test";
+        let answer_item_id = "item-ws-answer";
+        let auth_refresh_id = 91;
+        let final_message = json!({
+            "content": [{ "type": "text", "text": "4" }],
+            "stop_reason": "end_turn",
+        })
+        .to_string();
+        let mut waiting_for_auth_refresh = false;
+
+        while let Some(message) = ws.next().await {
+            let message = message.unwrap();
+            let text = match message {
+                WsMessage::Text(text) => text.to_string(),
+                WsMessage::Binary(bytes) => String::from_utf8(bytes.to_vec()).unwrap(),
+                WsMessage::Ping(payload) => {
+                    ws.send(WsMessage::Pong(payload)).await.unwrap();
+                    continue;
+                }
+                WsMessage::Close(_) => break,
+                _ => continue,
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let id = payload
+                .get("id")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let method = payload
+                .get("method")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let params = payload
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+
+            if waiting_for_auth_refresh && id == json!(auth_refresh_id) {
+                let result = payload
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                assert_eq!(result["accessToken"], "test-access-token");
+                assert_eq!(result["chatgptAccountId"], "acct-prev");
+                assert!(result["chatgptPlanType"].is_null());
+                waiting_for_auth_refresh = false;
+                ws.send(WsMessage::Text(
+                    json!({
+                        "method": "thread/tokenUsage/updated",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "tokenUsage": {
+                                "last": {
+                                    "inputTokens": 11,
+                                    "outputTokens": 3,
+                                }
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+                ws.send(WsMessage::Text(
+                    json!({
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "item": {
+                                "type": "agentMessage",
+                                "id": answer_item_id,
+                                "phase": "final_answer",
+                                "text": final_message,
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+                ws.send(WsMessage::Text(
+                    json!({
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": thread_id,
+                            "turn": {
+                                "id": turn_id,
+                                "status": "completed",
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+                continue;
+            }
+
+            match method {
+                "initialize" => {
+                    ws.send(WsMessage::Text(
+                        json!({
+                            "id": id,
+                            "result": {
+                                "userAgent": "fake-codex-ws/0",
+                                "platformFamily": "unix",
+                                "platformOs": "linux",
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                "thread/start" => {
+                    assert_eq!(params["config"]["web_search"], "disabled");
+                    assert_eq!(params["persistExtendedHistory"], true);
+                    assert_eq!(params["config"]["tools"]["view_image"], false);
+                    ws.send(WsMessage::Text(
+                        json!({
+                            "id": id,
+                            "result": { "thread": { "id": thread_id } }
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                "turn/start" => {
+                    let input = params["input"].as_array().cloned().unwrap_or_default();
+                    let input_text = input
+                        .iter()
+                        .filter(|item| item["type"] == "text")
+                        .filter_map(|item| item.get("text").and_then(|value| value.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(input_text.contains("what is 2+2?"));
+                    assert!(params["outputSchema"]["properties"]["content"].is_object());
+                    assert!(params["outputSchema"]["properties"]["stop_reason"].is_object());
+                    ws.send(WsMessage::Text(
+                        json!({
+                            "id": id,
+                            "result": { "turn": { "id": turn_id } }
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                    ws.send(WsMessage::Text(
+                        json!({
+                            "id": auth_refresh_id,
+                            "method": "account/chatgptAuthTokens/refresh",
+                            "params": {
+                                "reason": "startup",
+                                "previousAccountId": "acct-prev",
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                    waiting_for_auth_refresh = true;
+                }
+                _ => panic!("unsupported method: {method}"),
+            }
+        }
+    });
+
+    format!("ws://{addr}")
+}
+
 #[tokio::test]
 async fn codex_app_provider_answers_simple_question_via_fake_app_server() {
     let _guard = env_lock();
@@ -303,6 +490,51 @@ llm_provider: codex-app
 model: gpt-5.4
 "#,
     )
+    .unwrap();
+    let provider = create_provider(&config);
+    let response = provider
+        .send_message(
+            "",
+            vec![Message {
+                role: "user".into(),
+                content: MessageContent::Text("what is 2+2?".into()),
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
+    assert_eq!(response.content.len(), 1);
+    match &response.content[0] {
+        ResponseContentBlock::Text { text } => assert_eq!(text, "4"),
+        other => panic!("expected text response, got {other:?}"),
+    }
+    let usage = response.usage.expect("expected usage from token update");
+    assert_eq!(usage.input_tokens, 11);
+    assert_eq!(usage.output_tokens, 3);
+}
+
+#[tokio::test]
+async fn codex_app_provider_answers_simple_question_via_websocket_app_server() {
+    let _guard = env_lock();
+    let empty_bin_dir = unique_temp_dir("microclaw-codex-app-ws-path");
+    fs::create_dir_all(&empty_bin_dir).unwrap();
+    let _temp_dir = TempDirGuard {
+        path: empty_bin_dir.clone(),
+    };
+    let _path_guard = EnvVarGuard::set("PATH", empty_bin_dir.display().to_string());
+    let _access_token_guard =
+        EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-access-token".to_string());
+    let ws_url = spawn_fake_codex_websocket_server().await;
+
+    let config: Config = serde_yaml::from_str(&format!(
+        r#"
+llm_provider: codex-app
+model: gpt-5.4
+llm_base_url: {ws_url}
+"#
+    ))
     .unwrap();
     let provider = create_provider(&config);
     let response = provider

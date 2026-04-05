@@ -20,7 +20,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::DefaultTerminal;
 
 use crate::codex_auth::{
-    codex_auth_file_has_access_token, is_codex_app_provider, provider_allows_empty_api_key,
+    codex_app_websocket_url, codex_auth_file_has_access_token, is_codex_app_provider,
+    provider_allows_empty_api_key,
 };
 #[cfg(test)]
 use crate::codex_auth::{codex_config_default_openai_base_url, is_openai_codex_provider};
@@ -4153,10 +4154,14 @@ impl SetupApp {
                     .into(),
             ));
         }
-        if !self.field_value("LLM_BASE_URL").trim().is_empty() {
-            return Err(MicroClawError::Config(
-                "codex-app ignores LLM_BASE_URL here. It launches the local `codex app-server` binary and uses Codex CLI config instead.".into(),
-            ));
+        let base_url = self.field_value("LLM_BASE_URL");
+        let base_url = base_url.trim();
+        if !base_url.is_empty() {
+            if codex_app_websocket_url(Some(base_url)).is_none() {
+                return Err(MicroClawError::Config(
+                    "codex-app LLM_BASE_URL must use ws:// or wss:// when set.".into(),
+                ));
+            }
         }
 
         let override_timezone = self.field_value("OVERRIDE_TIMEZONE");
@@ -4407,10 +4412,14 @@ impl SetupApp {
                 "codex-app provider profiles ignore API key. Configure Codex via `codex login` instead.".into(),
             ));
         }
-        if !entry.base_url.trim().is_empty() {
-            return Err(MicroClawError::Config(
-                "codex-app provider profiles ignore Base URL. The local `codex app-server` binary uses Codex CLI config instead.".into(),
-            ));
+        let base_url = entry.base_url.trim();
+        if !base_url.is_empty() {
+            if codex_app_websocket_url(Some(base_url)).is_none() {
+                return Err(MicroClawError::Config(
+                    "codex-app provider profiles require Base URL to use ws:// or wss:// when set."
+                        .into(),
+                ));
+            }
         }
         let api_key = String::new();
         let codex_account_id: Option<String> = None;
@@ -5038,8 +5047,8 @@ impl SetupApp {
                 "Example: gpt-5.4",
             ),
             "LLM_BASE_URL" => (
-                "Unused for codex-app. The local Codex CLI configuration provides transport settings.",
-                "Leave empty",
+                "Optional remote codex-app websocket endpoint. Leave empty to launch local `codex app-server --listen stdio://`.",
+                "Example: ws://127.0.0.1:10962",
             ),
             "LLM_USER_AGENT" => (
                 "HTTP User-Agent for LLM requests. Empty means automatic MicroClaw/<version>.",
@@ -5491,10 +5500,18 @@ fn perform_online_validation(
             "LLM validation failed: codex-app ignores API key here. Configure Codex via `codex login` instead.".into(),
         ));
     }
-    if !base_url.trim().is_empty() {
-        return Err(MicroClawError::Config(
-            "LLM validation failed: codex-app ignores base URL here. It uses the local Codex CLI configuration.".into(),
+    let remote_ws_url = base_url.trim();
+    if !remote_ws_url.is_empty() {
+        let Some(remote_ws_url) = codex_app_websocket_url(Some(remote_ws_url)) else {
+            return Err(MicroClawError::Config(
+                "LLM validation failed: codex-app base URL must use ws:// or wss:// when set."
+                    .into(),
+            ));
+        };
+        checks.push(format!(
+            "LLM OK (codex-app, model={model}; remote websocket transport={remote_ws_url})"
         ));
+        return Ok(checks);
     }
     if !codex_auth_file_has_access_token()? {
         return Err(MicroClawError::Config(
@@ -10157,7 +10174,20 @@ sandbox:
     }
 
     #[test]
-    fn test_validate_local_rejects_codex_app_base_url() {
+    fn test_validate_local_accepts_codex_app_websocket_base_url() {
+        let mut app = SetupApp::new();
+        app.set_provider("codex-app");
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
+            field.value.clear();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_BASE_URL") {
+            field.value = "ws://127.0.0.1:10962".to_string();
+        }
+        app.validate_local().unwrap();
+    }
+
+    #[test]
+    fn test_validate_local_rejects_codex_app_non_websocket_base_url() {
         let mut app = SetupApp::new();
         app.set_provider("codex-app");
         if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
@@ -10167,7 +10197,7 @@ sandbox:
             field.value = "https://example.invalid/v1".to_string();
         }
         let err = app.validate_local().unwrap_err();
-        assert!(err.to_string().contains("ignores LLM_BASE_URL"));
+        assert!(err.to_string().contains("must use ws:// or wss://"));
     }
 
     #[test]

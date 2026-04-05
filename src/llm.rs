@@ -1,15 +1,19 @@
 use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::debug;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::process::Stdio;
 
 use crate::codex_auth::{
-    is_codex_app_provider, refresh_openai_codex_auth_if_needed, resolve_codex_chatgpt_auth_tokens,
+    codex_app_websocket_url, is_codex_app_provider, refresh_openai_codex_auth_if_needed,
+    resolve_codex_chatgpt_auth_tokens,
 };
 use crate::config::Config;
 #[cfg(test)]
@@ -164,46 +168,43 @@ pub fn create_provider(config: &Config) -> Box<dyn LlmProvider> {
 }
 
 type CodexAppServerLines = tokio::io::Lines<BufReader<tokio::process::ChildStdout>>;
+type CodexAppServerWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-#[derive(Default)]
-struct CodexAppServerTurnOutcome {
-    turn_id: String,
-    usage: Option<Usage>,
-    final_response_text: Option<String>,
-    fallback_response_text: Option<String>,
+enum CodexAppServerTransport {
+    Stdio {
+        child: tokio::process::Child,
+        stdin: tokio::process::ChildStdin,
+        stdout_lines: CodexAppServerLines,
+        stderr_task: Option<tokio::task::JoinHandle<String>>,
+    },
+    WebSocket {
+        url: String,
+        ws: CodexAppServerWebSocket,
+        pending: VecDeque<serde_json::Value>,
+    },
 }
 
-impl CodexAppServerTurnOutcome {
-    fn response_text(&self) -> Option<&str> {
-        self.final_response_text
-            .as_deref()
-            .or(self.fallback_response_text.as_deref())
-    }
-}
-
-pub struct CodexAppServerProvider {
-    model: String,
-}
-
-impl CodexAppServerProvider {
-    pub fn new(config: &Config) -> Self {
-        Self {
-            model: config.model.clone(),
+impl CodexAppServerTransport {
+    async fn connect(base_url: Option<&str>) -> Result<Self, MicroClawError> {
+        if let Some(base_url) = base_url.map(str::trim).filter(|value| !value.is_empty()) {
+            let Some(url) = codex_app_websocket_url(Some(base_url)) else {
+                return Err(MicroClawError::LlmApi(
+                    "codex-app llm_base_url must use ws:// or wss://".into(),
+                ));
+            };
+            let (ws, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .map_err(|err| {
+                    MicroClawError::LlmApi(format!(
+                        "Failed to connect to remote `codex app-server` websocket ({url}): {err}"
+                    ))
+                })?;
+            return Ok(Self::WebSocket {
+                url,
+                ws,
+                pending: VecDeque::new(),
+            });
         }
-    }
-
-    async fn run_request(
-        &self,
-        system: &str,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolDefinition>>,
-        model_override: Option<&str>,
-    ) -> Result<MessagesResponse, MicroClawError> {
-        let sanitized_messages = sanitize_messages(messages);
-        let model = model_override
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or(&self.model);
 
         let mut child = Command::new("codex")
             .arg("app-server")
@@ -217,7 +218,7 @@ impl CodexAppServerProvider {
                 MicroClawError::LlmApi(format!("Failed to start `codex app-server`: {e}"))
             })?;
 
-        let mut stdin = child.stdin.take().ok_or_else(|| {
+        let stdin = child.stdin.take().ok_or_else(|| {
             MicroClawError::LlmApi("`codex app-server` did not expose stdin".into())
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
@@ -241,11 +242,182 @@ impl CodexAppServerProvider {
                 buf
             })
         });
-        let mut stdout_lines = BufReader::new(stdout).lines();
+
+        Ok(Self::Stdio {
+            child,
+            stdin,
+            stdout_lines: BufReader::new(stdout).lines(),
+            stderr_task,
+        })
+    }
+
+    async fn send_json(&mut self, payload: &serde_json::Value) -> Result<(), MicroClawError> {
+        let payload = serde_json::to_string(payload)?;
+        match self {
+            Self::Stdio { stdin, .. } => {
+                stdin.write_all(payload.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
+            }
+            Self::WebSocket { ws, .. } => {
+                ws.send(WsMessage::Text(payload)).await.map_err(|err| {
+                    MicroClawError::LlmApi(format!(
+                        "Failed to send remote `codex app-server` websocket frame: {err}"
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn read_json(&mut self) -> Result<serde_json::Value, MicroClawError> {
+        match self {
+            Self::Stdio { stdout_lines, .. } => loop {
+                let Some(line) = stdout_lines.next_line().await? else {
+                    return Err(MicroClawError::LlmApi(
+                        "`codex app-server` closed stdout before completing the request".into(),
+                    ));
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<serde_json::Value>(trimmed) {
+                    Ok(value) => return Ok(value),
+                    Err(err) => {
+                        debug!(
+                            error = %err,
+                            line = trimmed,
+                            "Skipping non-JSON line from codex app-server stdout"
+                        );
+                    }
+                }
+            },
+            Self::WebSocket { url, ws, pending } => loop {
+                if let Some(value) = pending.pop_front() {
+                    return Ok(value);
+                }
+
+                let Some(frame) = ws.next().await else {
+                    return Err(MicroClawError::LlmApi(format!(
+                        "remote `codex app-server` websocket closed before completing the request ({url})"
+                    )));
+                };
+                let frame = frame.map_err(|err| {
+                    MicroClawError::LlmApi(format!(
+                        "Failed to read remote `codex app-server` websocket frame ({url}): {err}"
+                    ))
+                })?;
+                match frame {
+                    WsMessage::Text(text) => {
+                        codex_app_server_enqueue_ws_messages(pending, &text);
+                    }
+                    WsMessage::Binary(bytes) => match std::str::from_utf8(&bytes) {
+                        Ok(text) => codex_app_server_enqueue_ws_messages(pending, text),
+                        Err(err) => {
+                            debug!(
+                                error = %err,
+                                "Skipping non-UTF-8 binary frame from remote codex app-server websocket"
+                            );
+                        }
+                    },
+                    WsMessage::Ping(payload) => {
+                        ws.send(WsMessage::Pong(payload)).await.map_err(|err| {
+                            MicroClawError::LlmApi(format!(
+                                "Failed to reply to remote `codex app-server` websocket ping ({url}): {err}"
+                            ))
+                        })?;
+                    }
+                    WsMessage::Pong(_) => {}
+                    WsMessage::Close(frame) => {
+                        let detail = frame
+                            .as_ref()
+                            .map(|value| value.reason.to_string())
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| url.clone());
+                        return Err(MicroClawError::LlmApi(format!(
+                            "remote `codex app-server` websocket closed: {detail}"
+                        )));
+                    }
+                    _ => {}
+                }
+            },
+        }
+    }
+
+    async fn shutdown(self) -> String {
+        match self {
+            Self::Stdio {
+                mut child,
+                stderr_task,
+                ..
+            } => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                match stderr_task {
+                    Some(task) => task.await.unwrap_or_default(),
+                    None => String::new(),
+                }
+            }
+            Self::WebSocket { mut ws, .. } => {
+                let _ = ws.close(None).await;
+                String::new()
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct CodexAppServerTurnOutcome {
+    turn_id: String,
+    usage: Option<Usage>,
+    final_response_text: Option<String>,
+    fallback_response_text: Option<String>,
+}
+
+impl CodexAppServerTurnOutcome {
+    fn response_text(&self) -> Option<&str> {
+        self.final_response_text
+            .as_deref()
+            .or(self.fallback_response_text.as_deref())
+    }
+}
+
+pub struct CodexAppServerProvider {
+    model: String,
+    base_url: Option<String>,
+}
+
+impl CodexAppServerProvider {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            model: config.model.clone(),
+            base_url: config
+                .llm_base_url
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        }
+    }
+
+    async fn run_request(
+        &self,
+        system: &str,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        model_override: Option<&str>,
+    ) -> Result<MessagesResponse, MicroClawError> {
+        let sanitized_messages = sanitize_messages(messages);
+        let model = model_override
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&self.model);
+
+        let mut transport = CodexAppServerTransport::connect(self.base_url.as_deref()).await?;
 
         let result = async {
             codex_app_server_write_request(
-                &mut stdin,
+                &mut transport,
                 1,
                 "initialize",
                 json!({
@@ -259,10 +431,10 @@ impl CodexAppServerProvider {
                 }),
             )
             .await?;
-            let _ = codex_app_server_wait_for_response(&mut stdout_lines, &mut stdin, 1).await?;
+            let _ = codex_app_server_wait_for_response(&mut transport, 1).await?;
 
             codex_app_server_write_request(
-                &mut stdin,
+                &mut transport,
                 2,
                 "thread/start",
                 json!({
@@ -285,8 +457,7 @@ impl CodexAppServerProvider {
                 }),
             )
             .await?;
-            let thread_start = codex_app_server_wait_for_response(&mut stdout_lines, &mut stdin, 2)
-                .await?;
+            let thread_start = codex_app_server_wait_for_response(&mut transport, 2).await?;
             let thread_id = thread_start
                 .get("thread")
                 .and_then(|thread| thread.get("id"))
@@ -311,21 +482,18 @@ impl CodexAppServerProvider {
             if let Some(schema) = codex_app_server_output_schema(tools.as_deref()) {
                 turn_start_params["outputSchema"] = schema;
             }
-            codex_app_server_write_request(&mut stdin, 3, "turn/start", turn_start_params).await?;
-            let turn_start =
-                codex_app_server_wait_for_response(&mut stdout_lines, &mut stdin, 3).await?;
+            codex_app_server_write_request(&mut transport, 3, "turn/start", turn_start_params)
+                .await?;
+            let turn_start = codex_app_server_wait_for_response(&mut transport, 3).await?;
             let turn_id = turn_start
                 .get("turn")
                 .and_then(|turn| turn.get("id"))
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
 
-            let completion = codex_app_server_wait_for_turn_completion(
-                &mut stdout_lines,
-                &mut stdin,
-                turn_id.as_deref(),
-            )
-            .await?;
+            let completion =
+                codex_app_server_wait_for_turn_completion(&mut transport, turn_id.as_deref())
+                    .await?;
             let raw_response = completion.response_text().ok_or_else(|| {
                 MicroClawError::LlmApi(
                     "codex app-server completed the turn without a final agent message".into(),
@@ -339,12 +507,7 @@ impl CodexAppServerProvider {
         }
         .await;
 
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        let stderr_output = match stderr_task {
-            Some(task) => task.await.unwrap_or_default(),
-            None => String::new(),
-        };
+        let stderr_output = transport.shutdown().await;
 
         match result {
             Ok(response) => Ok(response),
@@ -360,53 +523,47 @@ impl CodexAppServerProvider {
 }
 
 async fn codex_app_server_write_request(
-    stdin: &mut tokio::process::ChildStdin,
+    transport: &mut CodexAppServerTransport,
     id: i64,
     method: &str,
     params: serde_json::Value,
 ) -> Result<(), MicroClawError> {
-    let payload = serde_json::to_string(&json!({
-        "id": id,
-        "method": method,
-        "params": params,
-    }))?;
-    stdin.write_all(payload.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
-    Ok(())
+    transport
+        .send_json(&json!({
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
+        .await
 }
 
 async fn codex_app_server_write_result(
-    stdin: &mut tokio::process::ChildStdin,
+    transport: &mut CodexAppServerTransport,
     id: serde_json::Value,
     result: serde_json::Value,
 ) -> Result<(), MicroClawError> {
-    let payload = serde_json::to_string(&json!({
-        "id": id,
-        "result": result,
-    }))?;
-    stdin.write_all(payload.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
-    Ok(())
+    transport
+        .send_json(&json!({
+            "id": id,
+            "result": result,
+        }))
+        .await
 }
 
 async fn codex_app_server_write_error(
-    stdin: &mut tokio::process::ChildStdin,
+    transport: &mut CodexAppServerTransport,
     id: serde_json::Value,
     message: &str,
 ) -> Result<(), MicroClawError> {
-    let payload = serde_json::to_string(&json!({
-        "id": id,
-        "error": {
-            "code": -32000,
-            "message": message,
-        }
-    }))?;
-    stdin.write_all(payload.as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
-    Ok(())
+    transport
+        .send_json(&json!({
+            "id": id,
+            "error": {
+                "code": -32000,
+                "message": message,
+            }
+        }))
+        .await
 }
 
 async fn codex_app_server_chatgpt_auth_refresh_result(
@@ -430,33 +587,13 @@ async fn codex_app_server_chatgpt_auth_refresh_result(
 }
 
 async fn codex_app_server_read_message(
-    lines: &mut CodexAppServerLines,
+    transport: &mut CodexAppServerTransport,
 ) -> Result<serde_json::Value, MicroClawError> {
-    loop {
-        let Some(line) = lines.next_line().await? else {
-            return Err(MicroClawError::LlmApi(
-                "`codex app-server` closed stdout before completing the request".into(),
-            ));
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(value) => return Ok(value),
-            Err(err) => {
-                debug!(
-                    error = %err,
-                    line = trimmed,
-                    "Skipping non-JSON line from codex app-server stdout"
-                );
-            }
-        }
-    }
+    transport.read_json().await
 }
 
 async fn codex_app_server_respond_to_server_request(
-    stdin: &mut tokio::process::ChildStdin,
+    transport: &mut CodexAppServerTransport,
     message: &serde_json::Value,
 ) -> Result<(), MicroClawError> {
     let Some(id) = message.get("id").cloned() else {
@@ -468,29 +605,33 @@ async fn codex_app_server_respond_to_server_request(
 
     match method {
         "item/commandExecution/requestApproval" => {
-            codex_app_server_write_result(stdin, id, json!({"decision": "decline"})).await
+            codex_app_server_write_result(transport, id, json!({"decision": "decline"})).await
         }
         "item/fileChange/requestApproval" => {
-            codex_app_server_write_result(stdin, id, json!({"decision": "decline"})).await
+            codex_app_server_write_result(transport, id, json!({"decision": "decline"})).await
         }
         "item/tool/requestUserInput" => {
-            codex_app_server_write_result(stdin, id, json!({"answers": {}})).await
+            codex_app_server_write_result(transport, id, json!({"answers": {}})).await
         }
         "mcpServer/elicitation/request" => {
             codex_app_server_write_result(
-                stdin,
+                transport,
                 id,
                 json!({"action": "decline", "content": null, "_meta": null}),
             )
             .await
         }
         "item/permissions/requestApproval" => {
-            codex_app_server_write_result(stdin, id, json!({"permissions": {}, "scope": "turn"}))
-                .await
+            codex_app_server_write_result(
+                transport,
+                id,
+                json!({"permissions": {}, "scope": "turn"}),
+            )
+            .await
         }
         "item/tool/call" => {
             codex_app_server_write_result(
-                stdin,
+                transport,
                 id,
                 json!({
                     "contentItems": [
@@ -511,16 +652,16 @@ async fn codex_app_server_respond_to_server_request(
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             match codex_app_server_chatgpt_auth_refresh_result(previous_account_id).await {
-                Ok(result) => codex_app_server_write_result(stdin, id, result).await,
-                Err(err) => codex_app_server_write_error(stdin, id, &err.to_string()).await,
+                Ok(result) => codex_app_server_write_result(transport, id, result).await,
+                Err(err) => codex_app_server_write_error(transport, id, &err.to_string()).await,
             }
         }
         "applyPatchApproval" | "execCommandApproval" => {
-            codex_app_server_write_result(stdin, id, json!({"decision": "denied"})).await
+            codex_app_server_write_result(transport, id, json!({"decision": "denied"})).await
         }
         _ => {
             codex_app_server_write_error(
-                stdin,
+                transport,
                 id,
                 &format!("Unsupported codex app-server request: {method}"),
             )
@@ -530,12 +671,11 @@ async fn codex_app_server_respond_to_server_request(
 }
 
 async fn codex_app_server_wait_for_response(
-    lines: &mut CodexAppServerLines,
-    stdin: &mut tokio::process::ChildStdin,
+    transport: &mut CodexAppServerTransport,
     request_id: i64,
 ) -> Result<serde_json::Value, MicroClawError> {
     loop {
-        let message = codex_app_server_read_message(lines).await?;
+        let message = codex_app_server_read_message(transport).await?;
         let response_id = message.get("id").and_then(|v| v.as_i64());
         if response_id == Some(request_id) {
             if let Some(result) = message.get("result") {
@@ -551,14 +691,13 @@ async fn codex_app_server_wait_for_response(
         }
 
         if message.get("id").is_some() && message.get("method").is_some() {
-            codex_app_server_respond_to_server_request(stdin, &message).await?;
+            codex_app_server_respond_to_server_request(transport, &message).await?;
         }
     }
 }
 
 async fn codex_app_server_wait_for_turn_completion(
-    lines: &mut CodexAppServerLines,
-    stdin: &mut tokio::process::ChildStdin,
+    transport: &mut CodexAppServerTransport,
     turn_id_hint: Option<&str>,
 ) -> Result<CodexAppServerTurnOutcome, MicroClawError> {
     let mut outcome = CodexAppServerTurnOutcome {
@@ -569,10 +708,10 @@ async fn codex_app_server_wait_for_turn_completion(
     };
 
     loop {
-        let message = codex_app_server_read_message(lines).await?;
+        let message = codex_app_server_read_message(transport).await?;
 
         if message.get("id").is_some() && message.get("method").is_some() {
-            codex_app_server_respond_to_server_request(stdin, &message).await?;
+            codex_app_server_respond_to_server_request(transport, &message).await?;
             continue;
         }
 
@@ -675,6 +814,51 @@ async fn codex_app_server_wait_for_turn_completion(
             _ => {}
         }
     }
+}
+
+fn codex_app_server_enqueue_ws_messages(
+    pending: &mut VecDeque<serde_json::Value>,
+    frame_text: &str,
+) {
+    let mut parsed_any = false;
+    for value in codex_app_server_parse_ws_messages(frame_text) {
+        parsed_any = true;
+        pending.push_back(value);
+    }
+    if !parsed_any && !frame_text.trim().is_empty() {
+        debug!(
+            frame = frame_text.trim(),
+            "Skipping non-JSON frame from remote codex app-server websocket"
+        );
+    }
+}
+
+fn codex_app_server_parse_ws_messages(frame_text: &str) -> Vec<serde_json::Value> {
+    let trimmed = frame_text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut values = Vec::new();
+    let mut iter = serde_json::Deserializer::from_str(trimmed).into_iter::<serde_json::Value>();
+    let mut parse_failed = false;
+    while let Some(value) = iter.next() {
+        match value {
+            Ok(value) => values.push(value),
+            Err(_) => {
+                parse_failed = true;
+                break;
+            }
+        }
+    }
+    if !parse_failed && !values.is_empty() {
+        return values;
+    }
+
+    frame_text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .collect()
 }
 
 fn codex_app_server_base_instructions(system: &str) -> Option<String> {
@@ -1043,9 +1227,12 @@ mod tests {
         fn contains_key(value: &serde_json::Value, needle: &str) -> bool {
             match value {
                 serde_json::Value::Object(map) => {
-                    map.contains_key(needle) || map.values().any(|child| contains_key(child, needle))
+                    map.contains_key(needle)
+                        || map.values().any(|child| contains_key(child, needle))
                 }
-                serde_json::Value::Array(items) => items.iter().any(|child| contains_key(child, needle)),
+                serde_json::Value::Array(items) => {
+                    items.iter().any(|child| contains_key(child, needle))
+                }
                 _ => false,
             }
         }

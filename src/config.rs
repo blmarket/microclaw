@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::codex_auth::is_codex_app_provider;
+use crate::codex_auth::{codex_app_websocket_url, is_codex_app_provider};
 use crate::plugins::PluginsConfig;
 use microclaw_core::error::MicroClawError;
 pub use microclaw_tools::sandbox::{SandboxBackend, SandboxConfig, SandboxMode, SecurityProfile};
@@ -1760,14 +1760,42 @@ Use operator password + API keys for Web auth."
                     "codex-app ignores microclaw.config.yaml api_key. Configure Codex via `codex login` instead.".into(),
                 ));
             }
-            if self
+            if let Some(base_url) = self
                 .llm_base_url
-                .as_ref()
-                .map(|v| !v.trim().is_empty())
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if codex_app_websocket_url(Some(base_url)).is_none() {
+                    return Err(MicroClawError::Config(
+                        "codex-app llm_base_url must use ws:// or wss:// when set.".into(),
+                    ));
+                }
+            }
+        }
+        for (alias, profile) in &self.llm_providers {
+            if let Some(base_url) = profile
+                .llm_base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if codex_app_websocket_url(Some(base_url)).is_none() {
+                    return Err(MicroClawError::Config(format!(
+                        "codex-app provider profile `{alias}` llm_base_url must use ws:// or wss://."
+                    )));
+                }
+            }
+            if profile
+                .api_key
+                .as_deref()
+                .map(|value| !value.trim().is_empty())
                 .unwrap_or(false)
             {
                 return Err(MicroClawError::Config(
-                    "codex-app ignores microclaw.config.yaml llm_base_url. It launches the local `codex app-server` binary and uses Codex CLI config instead.".into(),
+                    format!(
+                        "codex-app provider profile `{alias}` ignores api_key. Configure Codex via `codex login` instead."
+                    ),
                 ));
             }
         }
@@ -1980,7 +2008,11 @@ fn normalize_provider_profiles(
             }
             profile.provider = Some("codex-app".to_string());
             profile.api_key = None;
-            profile.llm_base_url = None;
+            profile.llm_base_url = profile
+                .llm_base_url
+                .as_ref()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
             profile.llm_user_agent = profile
                 .llm_user_agent
                 .as_ref()
@@ -2246,7 +2278,7 @@ provider_presets:
   lab:
     provider: OPENAI
     api_key: preset-key
-    llm_base_url: https://preset.example/v1
+    llm_base_url: ws://preset.example:9000
     llm_user_agent: preset-agent
     default_model: preset-model
     models: [preset-model, preset-model]
@@ -2262,7 +2294,10 @@ llm_providers:
         let profile = config.resolve_llm_provider_profile("lab").unwrap();
         assert_eq!(profile.provider, "codex-app");
         assert!(profile.api_key.is_empty());
-        assert!(profile.llm_base_url.is_none());
+        assert_eq!(
+            profile.llm_base_url.as_deref(),
+            Some("ws://preset.example:9000")
+        );
         assert_eq!(profile.llm_user_agent, "preset-agent");
         assert_eq!(profile.default_model, "preset-model");
         assert_eq!(
@@ -2637,6 +2672,24 @@ channels:
         let err = config.post_deserialize().unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("codex-app ignores microclaw.config.yaml api_key"));
+    }
+
+    #[test]
+    fn test_post_deserialize_codex_app_accepts_websocket_base_url() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: codex-app\nllm_base_url: ws://127.0.0.1:10962\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+        assert_eq!(config.llm_base_url.as_deref(), Some("ws://127.0.0.1:10962"));
+    }
+
+    #[test]
+    fn test_post_deserialize_codex_app_rejects_non_websocket_base_url() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\nllm_provider: codex-app\nllm_base_url: https://example.invalid/v1\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.post_deserialize().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("codex-app llm_base_url must use ws:// or wss://"));
     }
 
     #[test]
