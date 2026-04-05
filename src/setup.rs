@@ -31,7 +31,7 @@ use microclaw_core::error::MicroClawError;
 use microclaw_core::text::floor_char_boundary;
 
 use crate::channels::{
-    dingtalk, email, feishu, imessage, irc, matrix, nostr, qq, signal, slack, whatsapp,
+    dingtalk, email, feishu, imessage, irc, nostr, qq, signal, slack, whatsapp,
 };
 use crate::setup_def::DynamicChannelDef;
 
@@ -40,7 +40,6 @@ const DYNAMIC_CHANNELS: &[DynamicChannelDef] = &[
     slack::SETUP_DEF,
     feishu::SETUP_DEF,
     irc::SETUP_DEF,
-    matrix::SETUP_DEF,
     whatsapp::SETUP_DEF,
     imessage::SETUP_DEF,
     email::SETUP_DEF,

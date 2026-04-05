@@ -14,7 +14,6 @@ use crate::channels::discord::{build_discord_runtime_contexts, DiscordRuntimeCon
 use crate::channels::email::{build_email_runtime_contexts, EmailRuntimeContext};
 use crate::channels::feishu::{build_feishu_runtime_contexts, FeishuRuntimeContext};
 use crate::channels::imessage::{build_imessage_runtime_contexts, IMessageRuntimeContext};
-use crate::channels::matrix::{build_matrix_runtime_contexts, MatrixRuntimeContext};
 use crate::channels::nostr::{build_nostr_runtime_contexts, NostrRuntimeContext};
 use crate::channels::qq::{build_qq_runtime_contexts, QQRuntimeContext};
 use crate::channels::signal::{build_signal_runtime_contexts, SignalRuntimeContext};
@@ -25,8 +24,7 @@ use crate::channels::telegram::{
 use crate::channels::whatsapp::{build_whatsapp_runtime_contexts, WhatsAppRuntimeContext};
 use crate::channels::{
     DingTalkAdapter, DiscordAdapter, EmailAdapter, FeishuAdapter, IMessageAdapter, IrcAdapter,
-    MatrixAdapter, NostrAdapter, QQAdapter, SignalAdapter, SlackAdapter, TelegramAdapter,
-    WhatsAppAdapter,
+    NostrAdapter, QQAdapter, SignalAdapter, SlackAdapter, TelegramAdapter, WhatsAppAdapter,
 };
 use crate::config::Config;
 use crate::embedding::EmbeddingProvider;
@@ -212,21 +210,6 @@ pub async fn run(
                 .clone()
                 .map(|model| (runtime.channel_name.clone(), model))
         },
-    );
-    let matrix_runtimes: Vec<MatrixRuntimeContext> = prepare_channel_runtimes(
-        &config,
-        "matrix",
-        &mut registry,
-        &mut llm_model_overrides,
-        build_matrix_runtime_contexts,
-        |runtime, reg| {
-            reg.register(Arc::new(MatrixAdapter::new(
-                runtime.channel_name.clone(),
-                runtime.homeserver_url.clone(),
-                runtime.access_token.clone(),
-            )));
-        },
-        |_| None,
     );
     let whatsapp_runtimes: Vec<WhatsAppRuntimeContext> = prepare_channel_runtimes(
         &config,
@@ -545,21 +528,6 @@ pub async fn run(
         );
     }
 
-    let has_matrix = !matrix_runtimes.is_empty();
-    if has_matrix {
-        spawn_channel_runtimes(
-            state.clone(),
-            matrix_runtimes,
-            |channel_state, runtime_ctx| async move {
-                info!(
-                    "Starting Matrix bot adapter '{}' as {}",
-                    runtime_ctx.channel_name, runtime_ctx.bot_user_id
-                );
-                crate::channels::matrix::start_matrix_bot(channel_state, runtime_ctx).await;
-            },
-        );
-    }
-
     let has_whatsapp = !whatsapp_runtimes.is_empty();
     if has_whatsapp {
         spawn_channel_runtimes(
@@ -695,7 +663,6 @@ pub async fn run(
         has_discord,
         has_slack,
         has_feishu,
-        has_matrix,
         has_irc,
         has_whatsapp,
         has_imessage,
@@ -716,7 +683,7 @@ pub async fn run(
         Ok(())
     } else {
         Err(anyhow!(
-            "No channel is enabled. Configure channels.<name>.enabled (or legacy channel settings) for Telegram, Discord, Slack, Feishu, Matrix, WhatsApp, iMessage, Email, Nostr, Signal, DingTalk, QQ, IRC, or web."
+            "No channel is enabled. Configure channels.<name>.enabled (or legacy channel settings) for Telegram, Discord, Slack, Feishu, WhatsApp, iMessage, Email, Nostr, Signal, DingTalk, QQ, IRC, or web."
         ))
     }
 }
